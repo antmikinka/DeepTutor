@@ -5,20 +5,29 @@ import { useTranslation } from "react-i18next";
 import { ServiceConfigEditor } from "@/components/settings/ServiceConfigEditor";
 import { SettingsPageHeader } from "@/components/settings/shared";
 import { useVoiceAutoplayPreference } from "@/hooks/useVoiceAutoplay";
+import { useVoiceMathSpeakPreference } from "@/hooks/useVoiceMathSpeak";
 
-function AutoplayToggle() {
-  const { t } = useTranslation();
-  const { value, setValue, loading } = useVoiceAutoplayPreference();
+function PlaybackToggle({
+  label,
+  description,
+  value,
+  loading,
+  onChange,
+}: {
+  label: string;
+  description: string;
+  value: boolean;
+  loading: boolean;
+  onChange: (next: boolean) => void;
+}) {
   return (
     <div className="flex items-start justify-between gap-6 rounded-xl border border-[var(--border)]/60 bg-[var(--card)]/40 px-5 py-4">
       <div className="min-w-0 flex-1">
         <div className="text-[13.5px] font-medium text-[var(--foreground)]">
-          {t("Auto-play replies")}
+          {label}
         </div>
         <p className="mt-1 text-[12px] leading-relaxed text-[var(--muted-foreground)]">
-          {t(
-            "Read each assistant reply aloud automatically. You can also toggle this per conversation from the speaker button.",
-          )}
+          {description}
         </p>
       </div>
       <button
@@ -26,11 +35,11 @@ function AutoplayToggle() {
         role="switch"
         aria-checked={value}
         disabled={loading}
-        onClick={() => setValue(!value)}
+        onClick={() => onChange(!value)}
         className={`relative mt-0.5 inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors disabled:opacity-50 ${
           value ? "bg-[var(--foreground)]" : "bg-[var(--border)]"
         }`}
-        aria-label={t("Auto-play replies")}
+        aria-label={label}
       >
         <span
           className={`inline-block h-4 w-4 transform rounded-full bg-[var(--background)] shadow-sm transition-transform ${
@@ -39,6 +48,38 @@ function AutoplayToggle() {
         />
       </button>
     </div>
+  );
+}
+
+function AutoplayToggle() {
+  const { t } = useTranslation();
+  const { value, setValue, loading } = useVoiceAutoplayPreference();
+  return (
+    <PlaybackToggle
+      label={t("Auto-play replies")}
+      description={t(
+        "Read each assistant reply aloud automatically. You can also toggle this per conversation from the speaker button.",
+      )}
+      value={value}
+      loading={loading}
+      onChange={setValue}
+    />
+  );
+}
+
+function MathSpeakToggle() {
+  const { t } = useTranslation();
+  const { value, setValue, loading } = useVoiceMathSpeakPreference();
+  return (
+    <PlaybackToggle
+      label={t("Math speak")}
+      description={t(
+        "Read LaTeX as words — fractions, powers, and Greek letters. Turn this off to keep formulas closer to the written math. Dollar signs are never spoken.",
+      )}
+      value={value}
+      loading={loading}
+      onChange={setValue}
+    />
   );
 }
 
@@ -64,7 +105,10 @@ export default function TtsSettingsPage() {
             {t("How spoken replies behave in chat.")}
           </p>
         </div>
-        <AutoplayToggle />
+        <div className="space-y-3">
+          <AutoplayToggle />
+          <MathSpeakToggle />
+        </div>
       </section>
     </div>
   );

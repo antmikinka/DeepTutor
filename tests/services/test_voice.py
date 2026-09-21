@@ -66,6 +66,48 @@ def test_strip_markdown_truncates_on_boundary() -> None:
     assert out.endswith(".")
 
 
+def test_strip_markdown_unwraps_latex_dollars() -> None:
+    out = strip_markdown_for_speech("The identity is $E = mc^2$ and $$\\int x dx$$.")
+    assert "$" not in out
+    assert "\\" not in out
+    assert "E = mc squared" in out
+    assert "integral x dx" in out
+
+
+def test_strip_markdown_verbalizes_fractions_roots_and_greek() -> None:
+    out = strip_markdown_for_speech(
+        r"Take $\frac{1}{2}$ of $\sqrt{x}$ and $\alpha + \beta$."
+    )
+    assert "$" not in out
+    assert "\\" not in out
+    assert "{" not in out and "}" not in out
+    assert "1 over 2" in out
+    assert "square root of x" in out
+    cube = strip_markdown_for_speech(r"$\sqrt[3]{x}$")
+    assert "cube root of x" in cube
+    assert "alpha" in out
+    assert "beta" in out
+
+
+def test_strip_markdown_math_speak_off_keeps_inner_tex() -> None:
+    out = strip_markdown_for_speech(
+        r"The identity is $E = mc^2$ and $\frac{1}{2}$.",
+        math_speak=False,
+    )
+    assert "$" not in out
+    assert "E = mc^2" in out
+    assert r"\frac{1}{2}" in out
+    assert "squared" not in out
+    assert "over" not in out
+
+
+def test_strip_markdown_preserves_snake_case_outside_math() -> None:
+    out = strip_markdown_for_speech("See file_name and $x_i$.")
+    assert "file_name" in out
+    assert "x sub i" in out
+    assert "$" not in out
+
+
 def test_join_audio_path_appends_and_preserves_full_url() -> None:
     assert join_audio_path("https://api.openai.com/v1", "audio/speech").endswith("/v1/audio/speech")
     full = "https://r.azure.com/openai/deployments/tts/audio/speech?api-version=2025"
@@ -340,9 +382,18 @@ def test_resolve_tts_config_raises_without_model() -> None:
 async def test_synthesize_speech_facade_strips_markdown(monkeypatch: pytest.MonkeyPatch) -> None:
     resp = httpx.Response(200, content=b"audio", headers={"content-type": "audio/wav"})
     captured = _capture_post(monkeypatch, resp)
-    audio, ctype = await synthesize_speech("# Hi\n\n**bold**", catalog=_voice_catalog())
+    audio, ctype = await synthesize_speech(
+        "# Hi\n\n**bold** $x^2$",
+        catalog=_voice_catalog(),
+        math_speak=True,
+    )
     assert audio == b"audio"
-    assert captured["json"]["input"] == "Hi\n\nbold"  # markdown stripped
+    spoken = captured["json"]["input"]
+    assert spoken.startswith("Hi")
+    assert "bold" in spoken
+    assert "x squared" in spoken
+    assert "$" not in spoken
+    assert "^" not in spoken
 
 
 @pytest.mark.asyncio
