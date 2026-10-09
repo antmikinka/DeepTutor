@@ -117,6 +117,8 @@ def _record_from_problem(
         "placed_ids": [],
         "solved": False,
         "mode": mode,
+        "attempts": 0,
+        "placement_events": [],
     }
 
 
@@ -399,6 +401,23 @@ def _mode(record: dict[str, Any]) -> str:
     return "quest" if record.get("mode") == "quest" else "practice"
 
 
+_EVENT_CAP = 500
+
+
+def _count_attempt(record: dict[str, Any]) -> None:
+    record["attempts"] = int(record.get("attempts") or 0) + 1
+
+
+def _log_placement(record: dict[str, Any], step_id: str, index: int, accepted: bool) -> None:
+    """Append to the ordered placement log. Past the cap, stop; never trim."""
+    events = record.setdefault("placement_events", [])
+    if not isinstance(events, list) or len(events) >= _EVENT_CAP:
+        return
+    events.append(
+        {"step_id": step_id, "index": index, "accepted": accepted, "seq": len(events) + 1}
+    )
+
+
 def place_step(store: SequenceStore, problem_id: str, step_id: str, index: int) -> dict[str, Any]:
     def apply(record: dict[str, Any]) -> dict[str, Any]:
         if record.get("solved"):
@@ -429,7 +448,9 @@ def place_step(store: SequenceStore, problem_id: str, step_id: str, index: int) 
             else:
                 record["progress_solved"] = store.progress(record["kb_name"], record["topic"])
         else:
+            _count_attempt(record)
             record["progress_solved"] = store.progress(record["kb_name"], record["topic"])
+        _log_placement(record, step["id"], index, accepted)
         return {"accepted": accepted, "problem": public_problem(record)}
 
     return _mutate(store, problem_id, apply)
@@ -445,7 +466,8 @@ def remove_step(store: SequenceStore, problem_id: str, step_id: str) -> dict[str
             )
         _step(record, step_id)
         correct_ids = list(record.get("correct_ids") or [])
-        remaining = [item for item in record.get("placed_ids") or [] if item != step_id]
+        before = list(record.get("placed_ids") or [])
+        remaining = [item for item in before if item != step_id]
         kept: list[str] = []
         for item in remaining:
             if len(kept) < len(correct_ids) and correct_ids[len(kept)] == item:
@@ -453,6 +475,10 @@ def remove_step(store: SequenceStore, problem_id: str, step_id: str) -> dict[str
             else:
                 break
         record["placed_ids"] = kept
+        if kept != before:
+            # A removal breaks the prefix, so it is logged like a rejection.
+            index = before.index(step_id) if step_id in before else len(kept)
+            _log_placement(record, step_id, index, False)
         record["progress_solved"] = store.progress(record["kb_name"], record["topic"])
         return public_problem(record)
 
@@ -476,6 +502,8 @@ def check_answer(store: SequenceStore, problem_id: str, step_ids: list[str]) -> 
             raise SequenceError(
                 409, "This problem is solved step by step. Remove a step or place the next one."
             )
+        # Every graded check costs one attempt, including the solving one.
+        _count_attempt(record)
         correct_ids = list(record.get("correct_ids") or [])
         marks = [
             "correct" if index < len(correct_ids) and correct_ids[index] == step_id else "incorrect"

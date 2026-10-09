@@ -188,6 +188,13 @@ async def test_public_problem_hides_the_order_until_it_is_solved(tmp_path):
     rejected = place_step(store, view["problem_id"], wrong, 0)
     assert rejected["accepted"] is False
     assert rejected["problem"]["placed_ids"] == []
+    assert not {
+        "correct_ids",
+        "role",
+        "evidence",
+        "attempts",
+        "placement_events",
+    } & _forbidden_keys(rejected)
 
     for index, step_id in enumerate(saved["correct_ids"]):
         placed = place_step(store, view["problem_id"], step_id, index)
@@ -195,6 +202,14 @@ async def test_public_problem_hides_the_order_until_it_is_solved(tmp_path):
     assert placed["problem"]["solved"] is True
     assert placed["problem"]["explanation"]
     assert placed["problem"]["progress"]["solved"] == 1
+    assert placed["problem"]["mode"] == "quest"
+    assert not {
+        "correct_ids",
+        "role",
+        "evidence",
+        "attempts",
+        "placement_events",
+    } & _forbidden_keys(placed)
     with pytest.raises(SequenceError, match="already complete"):
         place_step(store, view["problem_id"], saved["correct_ids"][0], 0)
 
@@ -391,9 +406,14 @@ async def test_check_marks_a_leading_distractor_without_saving(tmp_path):
     assert result["marks"] == ["incorrect"]
     assert result["problem"]["placed_ids"] == []
     assert result["problem"]["explanation"] is None
-    assert "correct_ids" not in _forbidden_keys(result)
-    assert "role" not in _forbidden_keys(result["problem"])
-    assert "evidence" not in _forbidden_keys(result["problem"])
+    assert result["problem"]["mode"] == "practice"
+    assert not {
+        "correct_ids",
+        "role",
+        "evidence",
+        "attempts",
+        "placement_events",
+    } & _forbidden_keys(result)
     assert store.load(view["problem_id"])["placed_ids"] == []
     assert store.load(view["problem_id"])["solved"] is False
 
@@ -408,9 +428,13 @@ async def test_check_exact_order_solves_and_returns_the_explanation(tmp_path):
     assert result["problem"]["explanation"]
     assert result["problem"]["progress"]["solved"] == 1
     assert result["problem"]["placed_ids"] == correct_ids
-    assert "correct_ids" not in _forbidden_keys(result)
-    assert "role" not in _forbidden_keys(result["problem"])
-    assert "evidence" not in _forbidden_keys(result["problem"])
+    assert not {
+        "correct_ids",
+        "role",
+        "evidence",
+        "attempts",
+        "placement_events",
+    } & _forbidden_keys(result)
     saved = store.load(view["problem_id"])
     assert saved["solved"] is True
     assert saved["placed_ids"] == correct_ids
@@ -446,6 +470,13 @@ async def test_hint_uses_assembled_ids_and_scrubs_only_the_next_step(tmp_path):
 
     later = await hint(store, view["problem_id"], [correct_ids[0]], complete_text=leak_later)
     assert "2x" in later["hint"]
+    assert not {
+        "correct_ids",
+        "role",
+        "evidence",
+        "attempts",
+        "placement_events",
+    } & _forbidden_keys(later)
     assert by_id[correct_ids[0]]["math"] in seen["prompt"]
     assert by_id[correct_ids[1]]["math"] not in seen["prompt"]
     assert store.load(view["problem_id"])["placed_ids"] == []
@@ -503,9 +534,13 @@ async def test_explain_answers_for_a_step_the_learner_placed(tmp_path):
 
     result = await explain_step(store, view["problem_id"], first, complete_text=complete_text)
     assert result["explanation"] == "The outer function is differentiated first."
-    assert "correct_ids" not in _forbidden_keys(result)
-    assert "role" not in _forbidden_keys(result)
-    assert "evidence" not in _forbidden_keys(result)
+    assert not {
+        "correct_ids",
+        "role",
+        "evidence",
+        "attempts",
+        "placement_events",
+    } & _forbidden_keys(result)
 
 
 @pytest.mark.asyncio
@@ -700,6 +735,13 @@ async def test_generated_problems_default_to_practice_mode(tmp_path):
     store, view = await _generate(tmp_path)
     assert view["mode"] == "practice"
     assert store.load(view["problem_id"])["mode"] == "practice"
+    assert not {
+        "correct_ids",
+        "role",
+        "evidence",
+        "attempts",
+        "placement_events",
+    } & _forbidden_keys(view)
     quest_store, quest = await _generate(tmp_path, mode="quest")
     assert quest["mode"] == "quest"
     assert quest_store.load(quest["problem_id"])["mode"] == "quest"
@@ -716,7 +758,10 @@ async def test_practice_problems_reject_step_placement(tmp_path):
     with pytest.raises(SequenceError, match="checked as a whole") as removed:
         remove_step(store, view["problem_id"], first)
     assert removed.value.status == 409
-    assert store.load(view["problem_id"])["placed_ids"] == []
+    after = store.load(view["problem_id"])
+    assert after["placed_ids"] == []
+    assert after.get("placement_events", []) == []
+    assert after.get("attempts", 0) == 0
 
 
 @pytest.mark.asyncio
@@ -729,6 +774,8 @@ async def test_quest_problems_reject_whole_answer_checks(tmp_path):
     after = store.load(view["problem_id"])
     assert after["placed_ids"] == []
     assert after["solved"] is False
+    assert after["attempts"] == 0
+    assert after["placement_events"] == []
 
 
 @pytest.mark.asyncio
@@ -769,9 +816,13 @@ async def test_sessions_from_before_modes_stay_practice(tmp_path):
     graded = check_answer(store, "problem-000000000001", ["s_two", "s_one"])
     assert graded["solved"] is False
     assert graded["problem"]["mode"] == "practice"
+    saved = store.load("problem-000000000001")
+    assert saved["attempts"] == 1  # the counter materializes on first save
+    assert "placement_events" not in saved or saved["placement_events"] == []
     with pytest.raises(SequenceError, match="checked as a whole") as exc:
         place_step(store, "problem-000000000001", "s_one", 0)
     assert exc.value.status == 409
+    assert store.load("problem-000000000001")["attempts"] == 1
 
 
 @pytest.mark.asyncio
@@ -781,6 +832,9 @@ async def test_solved_problems_log_nothing_more(tmp_path):
     for index, step_id in enumerate(saved["correct_ids"]):
         place_step(store, view["problem_id"], step_id, index)
     assert store.load(view["problem_id"])["solved"] is True
+    frozen = store.load(view["problem_id"])
+    attempts_at_solve = frozen["attempts"]
+    events_at_solve = list(frozen["placement_events"])
     # The solved gate precedes the mode gate, so a solved quest problem
     # answers a whole-answer check with "already complete", not the mode 409.
     with pytest.raises(SequenceError, match="already complete") as checked:
@@ -792,10 +846,66 @@ async def test_solved_problems_log_nothing_more(tmp_path):
     with pytest.raises(SequenceError, match="already complete") as removed:
         remove_step(store, view["problem_id"], saved["correct_ids"][0])
     assert removed.value.status == 409
+    after = store.load(view["problem_id"])
+    assert after["attempts"] == attempts_at_solve
+    assert after["placement_events"] == events_at_solve
 
-    practice_store, practice = await _generate(tmp_path)
+    practice_store, practice = await _generate(tmp_path / "practice")
     practice_saved = practice_store.load(practice["problem_id"])
     check_answer(practice_store, practice["problem_id"], practice_saved["correct_ids"])
     with pytest.raises(SequenceError, match="already complete") as late_place:
         place_step(practice_store, practice["problem_id"], practice_saved["correct_ids"][0], 0)
     assert late_place.value.status == 409
+    assert practice_store.load(practice["problem_id"])["attempts"] == 1
+
+
+@pytest.mark.asyncio
+async def test_attempts_count_checks_and_misses(tmp_path):
+    # Separate roots: the deterministic id factory would otherwise give the
+    # two problems the same id and the second would overwrite the first.
+    practice_store, practice = await _generate(tmp_path / "practice")
+    practice_saved = practice_store.load(practice["problem_id"])
+    wrong = next(step["id"] for step in practice_saved["steps"] if step["role"] == "distractor")
+    check_answer(practice_store, practice["problem_id"], [wrong])
+    check_answer(practice_store, practice["problem_id"], [wrong])
+    assert practice_store.load(practice["problem_id"])["attempts"] == 2
+
+    quest_store, quest = await _generate(tmp_path / "quest", mode="quest")
+    quest_saved = quest_store.load(quest["problem_id"])
+    distractor = next(step["id"] for step in quest_saved["steps"] if step["role"] == "distractor")
+    first = quest_saved["correct_ids"][0]
+    assert place_step(quest_store, quest["problem_id"], distractor, 0)["accepted"] is False
+    assert place_step(quest_store, quest["problem_id"], first, 0)["accepted"] is True
+    # A rejected placement costs one attempt; an accepted one is progress.
+    assert quest_store.load(quest["problem_id"])["attempts"] == 1
+    # 2 failed checks + 1 rejected place + 1 accepted place = 3 graded misses.
+    total = practice_store.load(practice["problem_id"])["attempts"]
+    total += quest_store.load(quest["problem_id"])["attempts"]
+    assert total == 3
+
+    solved = check_answer(practice_store, practice["problem_id"], practice_saved["correct_ids"])
+    assert solved["solved"] is True
+    # The solving check costs one attempt too.
+    assert practice_store.load(practice["problem_id"])["attempts"] == 3
+
+
+@pytest.mark.asyncio
+async def test_placement_events_form_an_ordered_log(tmp_path):
+    store, view = await _generate(tmp_path, mode="quest")
+    saved = store.load(view["problem_id"])
+    first, second = saved["correct_ids"][:2]
+    wrong = next(step["id"] for step in saved["steps"] if step["role"] == "distractor")
+    assert place_step(store, view["problem_id"], first, 0)["accepted"] is True
+    assert place_step(store, view["problem_id"], wrong, 1)["accepted"] is False
+    assert place_step(store, view["problem_id"], second, 1)["accepted"] is True
+    remove_step(store, view["problem_id"], first)
+    events = store.load(view["problem_id"])["placement_events"]
+    assert [event["seq"] for event in events] == [1, 2, 3, 4]
+    assert events[0] == {"step_id": first, "index": 0, "accepted": True, "seq": 1}
+    assert events[1] == {"step_id": wrong, "index": 1, "accepted": False, "seq": 2}
+    assert events[2] == {"step_id": second, "index": 1, "accepted": True, "seq": 3}
+    # The removal breaks the prefix, so it is logged like a rejection.
+    assert events[3] == {"step_id": first, "index": 0, "accepted": False, "seq": 4}
+    # Removing a step that is not placed changes nothing and logs nothing.
+    remove_step(store, view["problem_id"], wrong)
+    assert store.load(view["problem_id"])["placement_events"] == events
