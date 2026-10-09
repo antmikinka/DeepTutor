@@ -16,6 +16,7 @@ export function ComboBadge({ combo }: { combo: number }) {
     <m.span
       key={combo}
       role="status"
+      aria-live="polite"
       className="inline-flex items-center rounded-full border border-[var(--success)] bg-[var(--success-surface)] px-3 py-1 text-sm font-semibold text-[var(--foreground)]"
       initial={reduceMotion ? false : { scale: 0.85 }}
       animate={reduceMotion ? undefined : { scale: [0.9, 1.12, 1] }}
