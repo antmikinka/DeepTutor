@@ -1,11 +1,17 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useReducedMotion } from "framer-motion";
 import { useTranslation } from "react-i18next";
 import InlineMarkdown from "@/components/common/InlineMarkdown";
 import MarkdownRenderer from "@/components/common/MarkdownRenderer";
 import { LearningShell } from "@/components/learning/LearningShell";
+import { ComboBadge } from "@/components/learning/sequence/ComboBadge";
+import { ProblemTimer } from "@/components/learning/sequence/ProblemTimer";
+import { ProgressRing } from "@/components/learning/sequence/ProgressRing";
+import { SequenceBanner } from "@/components/learning/sequence/SequenceBanner";
 import { SequenceModules } from "@/components/learning/sequence/SequenceModules";
+import { SolveCelebration } from "@/components/learning/sequence/SolveCelebration";
 import { selectClass, selectOptionClass } from "@/components/settings/shared";
 import { listKnowledgeBases, type KnowledgeBaseSummary } from "@/features/knowledge/api/client";
 import { knowledgeBaseRef } from "@/lib/knowledge-helpers";
@@ -14,16 +20,37 @@ import {
   createSequenceProblem,
   explainSequenceStep,
   getSequenceOutline,
+  placeSequenceStep,
   rebuildSequenceOutline,
+  removeSequenceStep,
   requestSequenceHint,
+  SequenceRequestError,
+  type SequenceMode,
   type SequenceOutline,
   type SequenceProblem,
   type SequenceStep,
 } from "@/lib/sequence-api";
+import { initialCombo, nextCombo, type ComboEvent, type ComboState } from "@/lib/sequence-combo";
+import {
+  playBreak,
+  playCombo,
+  playSuccess,
+  setSoundEnabled,
+  soundEnabled,
+  unlockAudio,
+} from "@/lib/sequence-sound";
+import { Dialog } from "@/shared/ui/Dialog";
 
 type StepStyle = "word" | "symbol";
 type StepMark = "correct" | "incorrect";
 type OutlinePhase = "idle" | "loading" | "reading" | "ready" | "error";
+
+interface CelebrationData {
+  seconds: number;
+  peakCombo: number;
+  progress: { solved: number; goal: number };
+  explanation: string | null;
+}
 
 function stepText(step: SequenceStep, style: StepStyle): string {
   if (style === "symbol") return step.math;
@@ -50,6 +77,7 @@ export function SequencePage() {
   const [activeTopic, setActiveTopic] = useState("");
   const [outline, setOutline] = useState<SequenceOutline | null>(null);
   const [outlinePhase, setOutlinePhase] = useState<OutlinePhase>("idle");
+  const [mode, setMode] = useState<SequenceMode>("practice");
   const [problem, setProblem] = useState<SequenceProblem | null>(null);
   const [assembled, setAssembled] = useState<string[]>([]);
   const [marks, setMarks] = useState<StepMark[] | null>(null);
@@ -59,6 +87,35 @@ export function SequencePage() {
   const [message, setMessage] = useState("");
   const [style, setStyle] = useState<StepStyle>("word");
   const [dialog, setDialog] = useState<{ title: string; body: string } | null>(null);
+  const [combo, setCombo] = useState<ComboState>(initialCombo);
+  const [aura, setAura] = useState<"accept" | "reject" | null>(null);
+  const [celebration, setCelebration] = useState<CelebrationData | null>(null);
+  const [soundOn, setSoundOn] = useState(false);
+  const comboRef = useRef<ComboState>(initialCombo);
+  const busyRef = useRef(false);
+  const auraTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const solvedCalledRef = useRef(false);
+  const placementSeq = useRef(0);
+  const startedAt = useRef(0);
+  const reduceMotion = useReducedMotion();
+
+  useEffect(() => {
+    // Read the persisted sound preference after mount so server and client
+    // render the same initial toggle state.
+    setSoundOn(soundEnabled());
+    return () => {
+      if (auraTimer.current) clearTimeout(auraTimer.current);
+    };
+  }, []);
+
+  useEffect(() => {
+    // The browser only resumes audio after a user gesture; arm the unlock on
+    // the first pointerdown while sound is on.
+    if (!soundOn) return;
+    const unlock = () => unlockAudio();
+    window.addEventListener("pointerdown", unlock, { once: true });
+    return () => window.removeEventListener("pointerdown", unlock);
+  }, [soundOn]);
 
   useEffect(() => {
     let cancelled = false;
@@ -126,6 +183,66 @@ export function SequencePage() {
     return map;
   }, [problem]);
 
+  function comboDispatch(event: ComboEvent): ComboState {
+    const next = nextCombo(comboRef.current, event);
+    comboRef.current = next;
+    setCombo(next);
+    return next;
+  }
+
+  function flashAura(kind: "accept" | "reject") {
+    setAura(kind);
+    if (auraTimer.current) clearTimeout(auraTimer.current);
+    auraTimer.current = setTimeout(() => setAura(null), 600);
+  }
+
+  function enterBusy(): boolean {
+    if (busyRef.current) return false;
+    busyRef.current = true;
+    setBusy(true);
+    return true;
+  }
+
+  function releaseBusy() {
+    busyRef.current = false;
+    setBusy(false);
+  }
+
+  function toggleSound() {
+    const next = !soundOn;
+    setSoundEnabled(next);
+    setSoundOn(next);
+    // The toggle click is itself the gesture the autoplay rule asks for.
+    if (next) unlockAudio();
+  }
+
+  /** Runs exactly once per problem, whichever response reports the solve. */
+  function celebrate(solvedProblem: SequenceProblem) {
+    if (solvedCalledRef.current) return;
+    solvedCalledRef.current = true;
+    const state = comboDispatch({ type: "solve" });
+    setCelebration({
+      seconds: Math.max(0, Math.floor((Date.now() - startedAt.current) / 1000)),
+      peakCombo: state.peak,
+      progress: solvedProblem.progress,
+      explanation: solvedProblem.explanation,
+    });
+    playSuccess();
+  }
+
+  function refreshOutlineProgress(progress: { solved: number; goal: number }) {
+    setOutline(current =>
+      current && {
+        ...current,
+        modules: current.modules.map(module =>
+          module.topic.trim() === activeTopic.trim()
+            ? { ...module, solved: progress.solved, goal: progress.goal }
+            : module,
+        ),
+      },
+    );
+  }
+
   async function readAgain() {
     if (!knowledgeBase || outlinePhase === "loading" || outlinePhase === "reading") return;
     const id = ++outlineRequest.current;
@@ -152,17 +269,23 @@ export function SequencePage() {
     }
     if (writingRef.current) return;
     const viewId = ++view.current;
+    placementSeq.current += 1;
     writingRef.current = true;
     setWriting(true);
     setMessage("");
     try {
-      const next = await createSequenceProblem(knowledgeBase, topic);
+      const next = await createSequenceProblem(knowledgeBase, topic, mode);
       if (view.current !== viewId) return;
       setActiveTopic(topic);
       setProblem(next);
       setAssembled([]);
       setMarks(null);
       setBanner(null);
+      setCelebration(null);
+      setAura(null);
+      comboDispatch({ type: "reset" });
+      solvedCalledRef.current = false;
+      startedAt.current = Date.now();
     } catch (error) {
       if (view.current !== viewId) return;
       // The server answers with fixed English sentences that double as i18n
@@ -185,35 +308,118 @@ export function SequencePage() {
     setBanner(null);
   }
 
+  async function placeQuestStep(stepId: string) {
+    if (!problem || problem.solved) return;
+    if (!enterBusy()) return;
+    const viewId = view.current;
+    const seq = ++placementSeq.current;
+    // A response only counts while this problem view is on screen AND no
+    // newer placement has been fired — out-of-order arrivals reconcile to
+    // the last server payload that passes both checks.
+    const fresh = () => view.current === viewId && seq === placementSeq.current;
+    setMessage("");
+    setBanner(null);
+    try {
+      // v1 appends at the end: the prefix rule makes the tail the only
+      // accepting index for a correct next step.
+      const result = await placeSequenceStep(problem.problem_id, stepId, problem.placed_ids.length);
+      if (!fresh()) return;
+      // The server payload is the only reconciliation source for the board.
+      setProblem(result.problem);
+      const state = comboDispatch({ type: result.accepted ? "accept" : "reject" });
+      flashAura(result.accepted ? "accept" : "reject");
+      setBanner(result.accepted ? "correct" : "incorrect");
+      if (result.accepted) playCombo(state.combo);
+      else playBreak();
+      if (result.problem.solved) {
+        celebrate(result.problem);
+        refreshOutlineProgress(result.problem.progress);
+      }
+    } catch (error) {
+      if (!fresh()) return;
+      // 409 means the server moved on (solved elsewhere, or the step is
+      // already placed); absorb it instead of shouting at the learner.
+      if (error instanceof SequenceRequestError && error.status === 409) return;
+      // A transport failure is not a wrong answer: the combo stays as-is.
+      setMessage(
+        error instanceof Error && error.message ? t(error.message) : t("Could not check that step."),
+      );
+    } finally {
+      releaseBusy();
+    }
+  }
+
+  async function removeQuestStep(stepId: string) {
+    if (!problem || problem.solved) return;
+    if (!enterBusy()) return;
+    const viewId = view.current;
+    const seq = ++placementSeq.current;
+    const fresh = () => view.current === viewId && seq === placementSeq.current;
+    setMessage("");
+    try {
+      const updated = await removeSequenceStep(problem.problem_id, stepId);
+      if (!fresh()) return;
+      // Remove answers with the bare problem, not the place wrapper.
+      setProblem(updated);
+      comboDispatch({ type: "remove" });
+      playBreak();
+    } catch (error) {
+      if (!fresh()) return;
+      if (error instanceof SequenceRequestError && error.status === 409 && solvedCalledRef.current) {
+        return;
+      }
+      setMessage(
+        error instanceof Error && error.message ? t(error.message) : t("Could not check that step."),
+      );
+    } finally {
+      releaseBusy();
+    }
+  }
+
   function addStep(stepId: string) {
     if (!problem || problem.solved || busy) return;
+    if (problem.mode === "quest") {
+      void placeQuestStep(stepId);
+      return;
+    }
     setAssembled(ids => (ids.includes(stepId) ? ids : [...ids, stepId]));
     clearVerdict();
   }
 
   function removePlaced(stepId: string) {
     if (!problem || problem.solved || busy) return;
+    if (problem.mode === "quest") {
+      void removeQuestStep(stepId);
+      return;
+    }
     setAssembled(ids => ids.filter(id => id !== stepId));
     clearVerdict();
   }
 
   function leaveProblem() {
     view.current += 1;
+    placementSeq.current += 1;
     writingRef.current = false;
     setWriting(false);
+    releaseBusy();
     setProblem(null);
     setAssembled([]);
     setMarks(null);
     setBanner(null);
     setMessage("");
     setDialog(null);
+    setCelebration(null);
+    setAura(null);
+    comboDispatch({ type: "reset" });
+    solvedCalledRef.current = false;
   }
 
   async function checkAnswer() {
     if (!problem || problem.solved || busy || assembled.length === 0) return;
     const viewId = view.current;
-    setBusy(true);
+    enterBusy();
     setMessage("");
+    setBanner(null);
     try {
       const result = await checkSequenceAnswer(problem.problem_id, assembled);
       if (view.current !== viewId) return;
@@ -222,28 +428,19 @@ export function SequencePage() {
       setMarks(result.marks);
       setBanner(solved ? "correct" : "incorrect");
       if (solved) {
-        setOutline(current =>
-          current && {
-            ...current,
-            modules: current.modules.map(module =>
-              module.topic.trim() === activeTopic.trim()
-                ? {
-                    ...module,
-                    solved: result.problem.progress.solved,
-                    goal: result.problem.progress.goal,
-                  }
-                : module,
-            ),
-          },
-        );
+        celebrate({ ...result.problem, solved });
+        refreshOutlineProgress(result.problem.progress);
       }
     } catch (error) {
       if (view.current !== viewId) return;
+      if (error instanceof SequenceRequestError && error.status === 409 && solvedCalledRef.current) {
+        return;
+      }
       setMessage(
         error instanceof Error && error.message ? t(error.message) : t("Could not check that step."),
       );
     } finally {
-      setBusy(false);
+      releaseBusy();
     }
   }
 
@@ -252,7 +449,12 @@ export function SequencePage() {
     const viewId = view.current;
     setDialog({ title: t("Hint"), body: "" });
     try {
-      const result = await requestSequenceHint(problem.problem_id, assembled);
+      // Quest keeps its board on the server, so the hint request carries no
+      // assembled list there; practice still sends what the learner built.
+      const result = await requestSequenceHint(
+        problem.problem_id,
+        problem.mode === "quest" ? undefined : assembled,
+      );
       if (view.current !== viewId) return;
       setDialog({ title: t("Hint"), body: result.hint });
     } catch {
@@ -275,8 +477,10 @@ export function SequencePage() {
     }
   }
 
-  const bank = problem?.steps.filter(step => !assembled.includes(step.id)) ?? [];
-  const placed = assembled
+  const questMode = problem?.mode === "quest";
+  const orderedIds = problem ? (questMode ? problem.placed_ids : assembled) : [];
+  const bank = problem?.steps.filter(step => !orderedIds.includes(step.id)) ?? [];
+  const placed = orderedIds
     .map((id, index) => {
       const step = byId.get(id);
       return step ? { step, mark: marks?.[index] } : null;
@@ -287,6 +491,12 @@ export function SequencePage() {
     outlinePhase !== "idle" &&
     outlinePhase !== "loading" &&
     !(outlinePhase === "reading" && outline === null);
+  const auraClass =
+    aura === "accept"
+      ? "shadow-[0_0_0_2px_var(--success)]"
+      : aura === "reject"
+        ? "shadow-[0_0_0_2px_var(--destructive)]"
+        : "";
 
   return (
     <LearningShell
@@ -314,6 +524,33 @@ export function SequencePage() {
             ))}
           </select>
         </label>
+        <div className="grid gap-1">
+          <div className="flex gap-1 rounded-lg border border-[var(--border)] p-1">
+            <button
+              type="button"
+              className={styleButton(mode === "practice")}
+              aria-pressed={mode === "practice"}
+              disabled={!!problem}
+              onClick={() => setMode("practice")}
+            >
+              {t("Practice")}
+            </button>
+            <button
+              type="button"
+              className={styleButton(mode === "quest")}
+              aria-pressed={mode === "quest"}
+              disabled={!!problem}
+              onClick={() => setMode("quest")}
+            >
+              {t("Quest")}
+            </button>
+          </div>
+          <p className="text-xs text-[var(--muted-foreground)]">
+            {mode === "practice"
+              ? t("Assemble the whole solution, then check it.")
+              : t("Place one step at a time and build a combo.")}
+          </p>
+        </div>
         {knowledgeBase && outlinePhase !== "idle" && (
           <button
             type="button"
@@ -401,7 +638,23 @@ export function SequencePage() {
             </p>
           </section>
 
-          <div className="flex justify-end">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-4">
+              <ProgressRing solved={problem.progress.solved} goal={problem.progress.goal} />
+              <ProblemTimer key={problem.problem_id} solved={problem.solved} />
+              <button
+                type="button"
+                aria-pressed={soundOn}
+                className={`rounded-lg border px-3 py-1 text-sm ${
+                  soundOn
+                    ? "border-[var(--primary)] bg-[var(--primary)] text-[var(--primary-foreground)]"
+                    : "border-[var(--border)] bg-[var(--background)] text-[var(--foreground)]"
+                }`}
+                onClick={toggleSound}
+              >
+                {t("Sound")}
+              </button>
+            </div>
             <div className="flex gap-1 rounded-lg border border-[var(--border)] p-1">
               <button type="button" className={styleButton(style === "word")} onClick={() => setStyle("word")}>
                 {t("Word and symbol")}
@@ -413,8 +666,15 @@ export function SequencePage() {
           </div>
 
           <div className="grid gap-4 lg:grid-cols-2">
-            <section className="rounded-xl border border-[var(--border)] bg-[var(--background)] p-4">
-              <h2 className="mb-3 text-center text-sm font-semibold">{t("Your solution")}</h2>
+            <section
+              className={`rounded-xl border border-[var(--border)] bg-[var(--background)] p-4 ${auraClass} ${
+                reduceMotion ? "" : "transition-shadow duration-200"
+              }`}
+            >
+              <div className="mb-3 flex items-center justify-center gap-2">
+                <h2 className="text-center text-sm font-semibold">{t("Your solution")}</h2>
+                {questMode && <ComboBadge combo={combo.combo} />}
+              </div>
               {placed.length === 0 && (
                 <p className="py-8 text-center text-sm text-[var(--muted-foreground)]">
                   {t("Click a step to add it. A step that does not belong stays until you remove it.")}
@@ -469,18 +729,7 @@ export function SequencePage() {
             </section>
           </div>
 
-          {banner && (
-            <p
-              role="status"
-              className={`rounded-lg border px-4 py-3 text-sm font-semibold ${
-                banner === "correct"
-                  ? "border-[var(--success)] bg-[var(--success-surface)] text-[var(--foreground)]"
-                  : "border-[var(--destructive)] bg-[color-mix(in_srgb,var(--destructive)_14%,var(--background))] text-[var(--foreground)]"
-              }`}
-            >
-              {banner === "correct" ? t("Correct. Well done.") : t("Not quite. Try again.")}
-            </p>
-          )}
+          {banner && <SequenceBanner verdict={banner} combo={combo.combo} onDismiss={() => setBanner(null)} />}
 
           <div className="flex flex-wrap justify-end gap-3">
             {!problem.solved && (
@@ -493,7 +742,7 @@ export function SequencePage() {
                 {t("Get a hint")}
               </button>
             )}
-            {!problem.solved && (
+            {!problem.solved && !questMode && (
               <button
                 type="button"
                 className="rounded-lg bg-[var(--primary)] px-4 py-2 text-sm text-[var(--primary-foreground)] disabled:opacity-60"
@@ -524,27 +773,29 @@ export function SequencePage() {
         </div>
       )}
 
-      {dialog && (
-        <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4" onClick={() => setDialog(null)}>
-          <div
-            role="dialog"
-            aria-modal="true"
-            aria-label={dialog.title}
-            className="max-h-[70vh] w-full max-w-lg overflow-y-auto rounded-xl border border-[var(--border)] bg-[var(--background)] p-5"
-            onClick={event => event.stopPropagation()}
-          >
-            <h2 className="mb-3 text-lg font-semibold">{dialog.title}</h2>
-            {dialog.body ? <MarkdownRenderer content={dialog.body} enableMath /> : <p>{t("One moment.")}</p>}
-            <button type="button" className="mt-4 text-sm underline" onClick={() => setDialog(null)}>
-              {t("Close")}
-            </button>
-          </div>
-        </div>
-      )}
+      <SolveCelebration
+        open={celebration !== null}
+        seconds={celebration?.seconds ?? 0}
+        peakCombo={celebration?.peakCombo ?? 0}
+        progress={celebration?.progress ?? { solved: 0, goal: 0 }}
+        explanation={celebration?.explanation ?? null}
+        onClose={() => setCelebration(null)}
+      />
+
+      <Dialog
+        open={dialog !== null}
+        title={dialog?.title ?? ""}
+        onClose={() => setDialog(null)}
+        closeLabel={t("Close")}
+      >
+        {dialog?.body ? <MarkdownRenderer content={dialog.body} enableMath /> : <p>{t("One moment.")}</p>}
+      </Dialog>
     </LearningShell>
   );
 }
 
 function styleButton(active: boolean): string {
-  return `rounded-md px-3 py-1 text-sm ${active ? "bg-[var(--primary)] text-[var(--primary-foreground)]" : ""}`;
+  return `rounded-md px-3 py-1 text-sm disabled:opacity-60 ${
+    active ? "bg-[var(--primary)] text-[var(--primary-foreground)]" : ""
+  }`;
 }

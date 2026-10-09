@@ -5967,5 +5967,11 @@
   "Solved in {{time}}": "Résolu en {{time}}",
   "Best combo ×{{count}}": "Meilleure série ×{{count}}",
   "Great placement.": "Bien placé.",
-  "Nice — that step belongs there.": "Bravo — cette étape a toute sa place ici."
+  "Nice — that step belongs there.": "Bravo — cette étape a toute sa place ici.",
+  "Quest": "Quête",
+  "Assemble the whole solution, then check it.": "Assemble toute la solution, puis vérifie-la.",
+  "Place one step at a time and build a combo.": "Place une étape à la fois et enchaîne une série.",
+  "Sound": "Son",
+  "This problem is checked as a whole. Use quest mode to place single steps.": "Cet exercice est vérifié dans son ensemble. Utilise le mode quête pour placer chaque étape.",
+  "This problem is solved step by step. Remove a step or place the next one.": "Cet exercice se résout étape par étape. Retire une étape ou place la suivante."
 }

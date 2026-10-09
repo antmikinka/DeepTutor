@@ -5587,5 +5587,11 @@
   "Solved in {{time}}": "Solved in {{time}}",
   "Best combo ×{{count}}": "Best combo ×{{count}}",
   "Great placement.": "Great placement.",
-  "Nice — that step belongs there.": "Nice — that step belongs there."
+  "Nice — that step belongs there.": "Nice — that step belongs there.",
+  "Quest": "Quest",
+  "Assemble the whole solution, then check it.": "Assemble the whole solution, then check it.",
+  "Place one step at a time and build a combo.": "Place one step at a time and build a combo.",
+  "Sound": "Sound",
+  "This problem is checked as a whole. Use quest mode to place single steps.": "This problem is checked as a whole. Use quest mode to place single steps.",
+  "This problem is solved step by step. Remove a step or place the next one.": "This problem is solved step by step. Remove a step or place the next one."
 }
