@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field, ValidationError
@@ -27,6 +28,7 @@ router = APIRouter()
 class CreateProblem(BaseModel):
     knowledge_base: str = Field(min_length=1, max_length=200)
     topic: str = Field(min_length=1, max_length=200)
+    mode: Literal["practice", "quest"] = "practice"
 
 
 class KnowledgeBaseName(BaseModel):
@@ -95,7 +97,7 @@ async def create_outline(body: KnowledgeBaseName):
 @router.post("/problems")
 async def create_problem(body: CreateProblem):
     try:
-        return await generate_problem(body.knowledge_base, body.topic, _store())
+        return await generate_problem(body.knowledge_base, body.topic, _store(), mode=body.mode)
     except SequenceError as exc:
         _raise(exc)
 

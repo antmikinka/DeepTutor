@@ -95,7 +95,7 @@ def _search_result(**extra):
     return result
 
 
-async def _generate(tmp_path, payload=None, search_result=None):
+async def _generate(tmp_path, payload=None, search_result=None, mode="practice"):
     store = SequenceStore(tmp_path)
     body = payload if payload is not None else _payload()
 
@@ -109,6 +109,7 @@ async def _generate(tmp_path, payload=None, search_result=None):
         "calculus",
         "chain rule",
         store,
+        mode=mode,
         language="en",
         search=search,
         complete_json=complete_json,
@@ -174,7 +175,7 @@ def test_explanation_that_copies_an_unplaced_expression_is_replaced():
 
 @pytest.mark.asyncio
 async def test_public_problem_hides_the_order_until_it_is_solved(tmp_path):
-    store, view = await _generate(tmp_path)
+    store, view = await _generate(tmp_path, mode="quest")
     saved = json.loads(
         (tmp_path / "sessions" / f"{view['problem_id']}.json").read_text(encoding="utf-8")
     )
@@ -200,7 +201,7 @@ async def test_public_problem_hides_the_order_until_it_is_solved(tmp_path):
 
 @pytest.mark.asyncio
 async def test_removing_an_earlier_step_drops_the_broken_tail(tmp_path):
-    store, view = await _generate(tmp_path)
+    store, view = await _generate(tmp_path, mode="quest")
     saved = json.loads(
         (tmp_path / "sessions" / f"{view['problem_id']}.json").read_text(encoding="utf-8")
     )
@@ -458,7 +459,7 @@ async def test_hint_uses_assembled_ids_and_scrubs_only_the_next_step(tmp_path):
 
 @pytest.mark.asyncio
 async def test_progress_counts_a_topic_once_per_problem(tmp_path):
-    store, first = await _generate(tmp_path)
+    store, first = await _generate(tmp_path, mode="quest")
     saved = json.loads(
         (tmp_path / "sessions" / f"{first['problem_id']}.json").read_text(encoding="utf-8")
     )
@@ -492,7 +493,7 @@ async def test_explain_needs_a_correctly_placed_step(tmp_path):
 
 @pytest.mark.asyncio
 async def test_explain_answers_for_a_step_the_learner_placed(tmp_path):
-    store, view = await _generate(tmp_path)
+    store, view = await _generate(tmp_path, mode="quest")
     saved = store.load(view["problem_id"])
     first = saved["correct_ids"][0]
     place_step(store, view["problem_id"], first, 0)
@@ -509,7 +510,7 @@ async def test_explain_answers_for_a_step_the_learner_placed(tmp_path):
 
 @pytest.mark.asyncio
 async def test_explain_keeps_the_eight_hundred_character_bound(tmp_path):
-    store, view = await _generate(tmp_path)
+    store, view = await _generate(tmp_path, mode="quest")
     saved = store.load(view["problem_id"])
     first = saved["correct_ids"][0]
     place_step(store, view["problem_id"], first, 0)
@@ -523,7 +524,7 @@ async def test_explain_keeps_the_eight_hundred_character_bound(tmp_path):
 
 @pytest.mark.asyncio
 async def test_explain_falls_back_to_the_stored_explanation(tmp_path):
-    store, view = await _generate(tmp_path)
+    store, view = await _generate(tmp_path, mode="quest")
     saved = store.load(view["problem_id"])
     by_id = {step["id"]: step for step in saved["steps"]}
     first = saved["correct_ids"][0]
@@ -538,7 +539,7 @@ async def test_explain_falls_back_to_the_stored_explanation(tmp_path):
 
 @pytest.mark.asyncio
 async def test_explain_that_leaks_an_unplaced_step_is_replaced(tmp_path):
-    store, view = await _generate(tmp_path)
+    store, view = await _generate(tmp_path, mode="quest")
     saved = store.load(view["problem_id"])
     by_id = {step["id"]: step for step in saved["steps"]}
     correct_ids = saved["correct_ids"]
@@ -653,7 +654,7 @@ def test_place_with_a_malformed_problem_id_is_a_404(tmp_path):
 
 @pytest.mark.asyncio
 async def test_two_placements_through_mutate_are_both_saved(tmp_path):
-    store, view = await _generate(tmp_path)
+    store, view = await _generate(tmp_path, mode="quest")
     saved = store.load(view["problem_id"])
     first, second = saved["correct_ids"][:2]
     assert place_step(store, view["problem_id"], first, 0)["accepted"] is True
@@ -663,7 +664,7 @@ async def test_two_placements_through_mutate_are_both_saved(tmp_path):
 
 @pytest.mark.asyncio
 async def test_remove_after_solve_is_a_conflict(tmp_path):
-    store, view = await _generate(tmp_path)
+    store, view = await _generate(tmp_path, mode="quest")
     saved = store.load(view["problem_id"])
     for index, step_id in enumerate(saved["correct_ids"]):
         place_step(store, view["problem_id"], step_id, index)
@@ -692,3 +693,109 @@ def test_load_treats_a_corrupt_session_as_missing(tmp_path):
     with pytest.raises(SequenceError, match="no longer available") as exc:
         place_step(store, "corrupt-session-000001", "s_one", 0)
     assert exc.value.status == 404
+
+
+@pytest.mark.asyncio
+async def test_generated_problems_default_to_practice_mode(tmp_path):
+    store, view = await _generate(tmp_path)
+    assert view["mode"] == "practice"
+    assert store.load(view["problem_id"])["mode"] == "practice"
+    quest_store, quest = await _generate(tmp_path, mode="quest")
+    assert quest["mode"] == "quest"
+    assert quest_store.load(quest["problem_id"])["mode"] == "quest"
+
+
+@pytest.mark.asyncio
+async def test_practice_problems_reject_step_placement(tmp_path):
+    store, view = await _generate(tmp_path)
+    saved = store.load(view["problem_id"])
+    first = saved["correct_ids"][0]
+    with pytest.raises(SequenceError, match="checked as a whole") as placed:
+        place_step(store, view["problem_id"], first, 0)
+    assert placed.value.status == 409
+    with pytest.raises(SequenceError, match="checked as a whole") as removed:
+        remove_step(store, view["problem_id"], first)
+    assert removed.value.status == 409
+    assert store.load(view["problem_id"])["placed_ids"] == []
+
+
+@pytest.mark.asyncio
+async def test_quest_problems_reject_whole_answer_checks(tmp_path):
+    store, view = await _generate(tmp_path, mode="quest")
+    saved = store.load(view["problem_id"])
+    with pytest.raises(SequenceError, match="solved step by step") as exc:
+        check_answer(store, view["problem_id"], saved["correct_ids"])
+    assert exc.value.status == 409
+    after = store.load(view["problem_id"])
+    assert after["placed_ids"] == []
+    assert after["solved"] is False
+
+
+@pytest.mark.asyncio
+async def test_sessions_from_before_modes_stay_practice(tmp_path):
+    store = SequenceStore(tmp_path)
+    store.save(
+        {
+            "id": "problem-000000000001",
+            "kb_name": "calculus",
+            "topic": "chain rule",
+            "language": "en",
+            "question": "Differentiate.",
+            "explanation": "Outer times inner.",
+            "formulas": [],
+            "context": "",
+            "sources": [],
+            "steps": [
+                {
+                    "id": "s_one",
+                    "explanation": "First move.",
+                    "math": "$1$",
+                    "role": "correct",
+                    "evidence": "",
+                },
+                {
+                    "id": "s_two",
+                    "explanation": "Second move.",
+                    "math": "$2$",
+                    "role": "correct",
+                    "evidence": "",
+                },
+            ],
+            "correct_ids": ["s_one", "s_two"],
+            "placed_ids": [],
+            "solved": False,
+        }
+    )
+    graded = check_answer(store, "problem-000000000001", ["s_two", "s_one"])
+    assert graded["solved"] is False
+    assert graded["problem"]["mode"] == "practice"
+    with pytest.raises(SequenceError, match="checked as a whole") as exc:
+        place_step(store, "problem-000000000001", "s_one", 0)
+    assert exc.value.status == 409
+
+
+@pytest.mark.asyncio
+async def test_solved_problems_log_nothing_more(tmp_path):
+    store, view = await _generate(tmp_path, mode="quest")
+    saved = store.load(view["problem_id"])
+    for index, step_id in enumerate(saved["correct_ids"]):
+        place_step(store, view["problem_id"], step_id, index)
+    assert store.load(view["problem_id"])["solved"] is True
+    # The solved gate precedes the mode gate, so a solved quest problem
+    # answers a whole-answer check with "already complete", not the mode 409.
+    with pytest.raises(SequenceError, match="already complete") as checked:
+        check_answer(store, view["problem_id"], saved["correct_ids"])
+    assert checked.value.status == 409
+    with pytest.raises(SequenceError, match="already complete") as placed:
+        place_step(store, view["problem_id"], saved["correct_ids"][0], 0)
+    assert placed.value.status == 409
+    with pytest.raises(SequenceError, match="already complete") as removed:
+        remove_step(store, view["problem_id"], saved["correct_ids"][0])
+    assert removed.value.status == 409
+
+    practice_store, practice = await _generate(tmp_path)
+    practice_saved = practice_store.load(practice["problem_id"])
+    check_answer(practice_store, practice["problem_id"], practice_saved["correct_ids"])
+    with pytest.raises(SequenceError, match="already complete") as late_place:
+        place_step(practice_store, practice["problem_id"], practice_saved["correct_ids"][0], 0)
+    assert late_place.value.status == 409

@@ -14,9 +14,10 @@ def _client():
 
 
 def test_create_returns_the_service_payload(monkeypatch):
-    async def fake_generate(knowledge_base, topic, _store):
+    async def fake_generate(knowledge_base, topic, _store, mode="practice"):
         assert knowledge_base == "calculus"
         assert topic == "chain rule"
+        assert mode == "practice"
         return {
             "problem_id": "problem-000000000001",
             "question": "Differentiate.",
@@ -24,6 +25,7 @@ def test_create_returns_the_service_payload(monkeypatch):
             "steps": [],
             "placed_ids": [],
             "solved": False,
+            "mode": mode,
             "explanation": None,
             "progress": {"solved": 0, "goal": 5},
             "sources": [],
@@ -39,8 +41,39 @@ def test_create_returns_the_service_payload(monkeypatch):
     assert "correct_ids" not in response.json()
 
 
+def test_create_passes_the_chosen_mode_to_the_service(monkeypatch):
+    async def fake_generate(_knowledge_base, _topic, _store, mode="practice"):
+        assert mode == "quest"
+        return {
+            "problem_id": "problem-000000000001",
+            "question": "Differentiate.",
+            "formulas": [],
+            "steps": [],
+            "placed_ids": [],
+            "solved": False,
+            "mode": mode,
+            "explanation": None,
+            "progress": {"solved": 0, "goal": 5},
+            "sources": [],
+        }
+
+    monkeypatch.setattr(sequence, "generate_problem", fake_generate)
+    response = _client().post(
+        "/api/solution-sequence/problems",
+        json={"knowledge_base": "calculus", "topic": "chain rule", "mode": "quest"},
+    )
+    assert response.status_code == 200
+    assert response.json()["mode"] == "quest"
+
+    rejected = _client().post(
+        "/api/solution-sequence/problems",
+        json={"knowledge_base": "calculus", "topic": "chain rule", "mode": "marathon"},
+    )
+    assert rejected.status_code == 422
+
+
 def test_create_maps_a_grounding_failure(monkeypatch):
-    async def fake_generate(_knowledge_base, _topic, _store):
+    async def fake_generate(_knowledge_base, _topic, _store, mode="practice"):
         raise SequenceError(
             422, "That knowledge base did not return enough material for this topic."
         )

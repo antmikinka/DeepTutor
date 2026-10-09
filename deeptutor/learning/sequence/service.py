@@ -70,6 +70,7 @@ def _record_from_problem(
     corpus: str,
     sources: list[dict[str, str]],
     language: str,
+    mode: str,
     id_factory: Callable[[], str] | None,
     shuffle: Callable[[list], None] | None,
 ) -> dict[str, Any]:
@@ -115,6 +116,7 @@ def _record_from_problem(
         "correct_ids": correct_ids,
         "placed_ids": [],
         "solved": False,
+        "mode": mode,
     }
 
 
@@ -189,6 +191,7 @@ async def generate_problem(
     topic: str,
     store: SequenceStore,
     *,
+    mode: str = "practice",
     language: str | None = None,
     search=None,
     complete_json=None,
@@ -198,6 +201,7 @@ async def generate_problem(
     """Retrieve passages, write one problem, and return the public view."""
     kb_name = kb_name.strip()
     topic = " ".join(topic.split())
+    mode = "quest" if mode == "quest" else "practice"
     if not kb_name:
         raise SequenceError(422, "Choose a knowledge base.")
     if not topic or len(topic) > 200:
@@ -233,6 +237,7 @@ async def generate_problem(
         corpus=corpus,
         sources=source_labels(result),
         language=language,
+        mode=mode,
         id_factory=id_factory,
         shuffle=shuffle,
     )
@@ -389,10 +394,19 @@ def _step(record: dict[str, Any], step_id: str) -> dict[str, str]:
     raise SequenceError(404, "That step is not part of this problem.")
 
 
+def _mode(record: dict[str, Any]) -> str:
+    """Sessions written before modes existed are practice sessions."""
+    return "quest" if record.get("mode") == "quest" else "practice"
+
+
 def place_step(store: SequenceStore, problem_id: str, step_id: str, index: int) -> dict[str, Any]:
     def apply(record: dict[str, Any]) -> dict[str, Any]:
         if record.get("solved"):
             raise SequenceError(409, "This solution is already complete.")
+        if _mode(record) != "quest":
+            raise SequenceError(
+                409, "This problem is checked as a whole. Use quest mode to place single steps."
+            )
         step = _step(record, step_id)
         placed = list(record.get("placed_ids") or [])
         if step_id in placed:
@@ -425,6 +439,10 @@ def remove_step(store: SequenceStore, problem_id: str, step_id: str) -> dict[str
     def apply(record: dict[str, Any]) -> dict[str, Any]:
         if record.get("solved"):
             raise SequenceError(409, "This solution is already complete.")
+        if _mode(record) != "quest":
+            raise SequenceError(
+                409, "This problem is checked as a whole. Use quest mode to place single steps."
+            )
         _step(record, step_id)
         correct_ids = list(record.get("correct_ids") or [])
         remaining = [item for item in record.get("placed_ids") or [] if item != step_id]
@@ -454,6 +472,10 @@ def check_answer(store: SequenceStore, problem_id: str, step_ids: list[str]) -> 
             raise SequenceError(422, "Each step can appear only once.")
         if record.get("solved"):
             raise SequenceError(409, "This solution is already complete.")
+        if _mode(record) != "practice":
+            raise SequenceError(
+                409, "This problem is solved step by step. Remove a step or place the next one."
+            )
         correct_ids = list(record.get("correct_ids") or [])
         marks = [
             "correct" if index < len(correct_ids) and correct_ids[index] == step_id else "incorrect"
