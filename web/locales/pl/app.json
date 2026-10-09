@@ -5599,5 +5599,9 @@
   "Submit at most 12 steps.": "Prześlij maksymalnie 12 kroków.",
   "Each step can appear only once.": "Każdy krok może wystąpić tylko raz.",
   "Place this step correctly before asking why.": "Umieść ten krok poprawnie, zanim zapytasz dlaczego.",
-  "Say which steps are already assembled.": "Wskaż, które kroki są już złożone."
+  "Say which steps are already assembled.": "Wskaż, które kroki są już złożone.",
+  "Solved in {{time}}": "Rozwiązano w {{time}}",
+  "Best combo ×{{count}}": "Najlepsza seria ×{{count}}",
+  "Great placement.": "Świetne umiejscowienie.",
+  "Nice — that step belongs there.": "Ładnie — ten krok właśnie tam pasuje."
 }

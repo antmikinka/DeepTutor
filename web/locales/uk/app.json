@@ -5599,5 +5599,9 @@
   "Submit at most 12 steps.": "Надішли щонайбільше 12 кроків.",
   "Each step can appear only once.": "Кожен крок може траплятися лише один раз.",
   "Place this step correctly before asking why.": "Спершу правильно розмісти цей крок, а потім питай чому.",
-  "Say which steps are already assembled.": "Вкажи, які кроки вже зібрано."
+  "Say which steps are already assembled.": "Вкажи, які кроки вже зібрано.",
+  "Solved in {{time}}": "Розв'язано за {{time}}",
+  "Best combo ×{{count}}": "Найкраща серія ×{{count}}",
+  "Great placement.": "Гарне розміщення.",
+  "Nice — that step belongs there.": "Гарно — цей крок саме тут і належить."
 }

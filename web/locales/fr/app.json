@@ -5963,5 +5963,9 @@
   "Submit at most 12 steps.": "Soumets au plus 12 étapes.",
   "Each step can appear only once.": "Chaque étape ne peut apparaître qu'une fois.",
   "Place this step correctly before asking why.": "Place cette étape correctement avant de demander pourquoi.",
-  "Say which steps are already assembled.": "Indique quelles étapes sont déjà assemblées."
+  "Say which steps are already assembled.": "Indique quelles étapes sont déjà assemblées.",
+  "Solved in {{time}}": "Résolu en {{time}}",
+  "Best combo ×{{count}}": "Meilleure série ×{{count}}",
+  "Great placement.": "Bien placé.",
+  "Nice — that step belongs there.": "Bravo — cette étape a toute sa place ici."
 }

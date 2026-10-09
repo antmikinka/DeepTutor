@@ -5583,5 +5583,9 @@
   "Submit at most 12 steps.": "最多提交 12 个步骤。",
   "Each step can appear only once.": "每个步骤只能出现一次。",
   "Place this step correctly before asking why.": "先正确放置这一步，再问为什么。",
-  "Say which steps are already assembled.": "请说明哪些步骤已经拼好。"
+  "Say which steps are already assembled.": "请说明哪些步骤已经拼好。",
+  "Solved in {{time}}": "用时 {{time}} 解出",
+  "Best combo ×{{count}}": "最佳连对 ×{{count}}",
+  "Great placement.": "放得好。",
+  "Nice — that step belongs there.": "不错——这一步就该放在这里。"
 }

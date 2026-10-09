@@ -5583,5 +5583,9 @@
   "Submit at most 12 steps.": "Submit at most 12 steps.",
   "Each step can appear only once.": "Each step can appear only once.",
   "Place this step correctly before asking why.": "Place this step correctly before asking why.",
-  "Say which steps are already assembled.": "Say which steps are already assembled."
+  "Say which steps are already assembled.": "Say which steps are already assembled.",
+  "Solved in {{time}}": "Solved in {{time}}",
+  "Best combo ×{{count}}": "Best combo ×{{count}}",
+  "Great placement.": "Great placement.",
+  "Nice — that step belongs there.": "Nice — that step belongs there."
 }
