@@ -23,6 +23,7 @@ const PROBLEM: SequenceProblem = {
   ],
   placed_ids: [],
   solved: false,
+  mode: "practice",
   explanation: null,
   progress: { solved: 0, goal: 5 },
   sources: [{ title: "calculus/chain_rule.pdf" }],
@@ -75,6 +76,21 @@ describe("sequence-api request mapping", () => {
     expect(JSON.parse(init.body as string)).toEqual({
       knowledge_base: "Calculus",
       topic: "chain rule",
+      mode: "practice",
+    });
+  });
+
+  it("sends the chosen mode so the problem is locked to it", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ ...PROBLEM, mode: "quest" }));
+
+    const problem = await createSequenceProblem("Calculus", "chain rule", "quest");
+
+    expect(problem.mode).toBe("quest");
+    const [, init] = fetchMock.mock.calls[0];
+    expect(JSON.parse(init.body as string)).toEqual({
+      knowledge_base: "Calculus",
+      topic: "chain rule",
+      mode: "quest",
     });
   });
 

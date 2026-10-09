@@ -9,6 +9,8 @@ export interface SequenceStep {
   math: string;
 }
 
+export type SequenceMode = "practice" | "quest";
+
 export interface SequenceProblem {
   problem_id: string;
   question: string;
@@ -16,6 +18,7 @@ export interface SequenceProblem {
   steps: SequenceStep[];
   placed_ids: string[];
   solved: boolean;
+  mode: SequenceMode;
   explanation: string | null;
   progress: { solved: number; goal: number };
   sources: { title: string }[];
@@ -83,8 +86,16 @@ async function request<T>(path: string, body?: unknown, method: "GET" | "POST" =
   return response.json() as Promise<T>;
 }
 
-export function createSequenceProblem(knowledgeBase: string, topic: string) {
-  return request<SequenceProblem>("/problems", { knowledge_base: knowledgeBase, topic });
+export function createSequenceProblem(
+  knowledgeBase: string,
+  topic: string,
+  mode: SequenceMode = "practice",
+) {
+  return request<SequenceProblem>("/problems", {
+    knowledge_base: knowledgeBase,
+    topic,
+    mode,
+  });
 }
 
 export function placeSequenceStep(problemId: string, stepId: string, index: number) {
