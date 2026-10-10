@@ -5972,6 +5972,12 @@
   "Assemble the whole solution, then check it.": "Assemble toute la solution, puis vérifie-la.",
   "Place one step at a time and build a combo.": "Place une étape à la fois et enchaîne une série.",
   "Sound": "Son",
+  "Auto-check": "Vérification auto",
+  "Check each step as you place it.": "Vérifie chaque étape dès que tu la places.",
+  "Play sounds for right and wrong steps": "Jouer des sons pour les étapes justes et fausses",
+  "Previously marked incorrect": "Précédemment marquée incorrecte",
+  "Previously marked correct": "Précédemment marquée correcte",
+  "Solution {{percent}}% built": "Solution construite à {{percent}} %",
   "This problem is checked as a whole. Use quest mode to place single steps.": "Cet exercice est vérifié dans son ensemble. Utilise le mode quête pour placer chaque étape.",
   "This problem is solved step by step. Remove a step or place the next one.": "Cet exercice se résout étape par étape. Retire une étape ou place la suivante."
 }

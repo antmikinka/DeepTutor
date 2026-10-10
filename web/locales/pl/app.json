@@ -5608,6 +5608,12 @@
   "Assemble the whole solution, then check it.": "Ułóż całe rozwiązanie, a następnie je sprawdź.",
   "Place one step at a time and build a combo.": "Umieszczaj po jednym kroku i buduj serię.",
   "Sound": "Dźwięk",
+  "Auto-check": "Autosprawdzanie",
+  "Check each step as you place it.": "Sprawdzaj każdy krok, gdy go umieszczasz.",
+  "Play sounds for right and wrong steps": "Odtwarzaj dźwięki dla kroków poprawnych i błędnych",
+  "Previously marked incorrect": "Wcześniej oznaczony jako błędny",
+  "Previously marked correct": "Wcześniej oznaczony jako poprawny",
+  "Solution {{percent}}% built": "Rozwiązanie zbudowane w {{percent}}%",
   "This problem is checked as a whole. Use quest mode to place single steps.": "To zadanie jest sprawdzane jako całość. Użyj trybu misji, aby umieszczać pojedyncze kroki.",
   "This problem is solved step by step. Remove a step or place the next one.": "To zadanie rozwiązujesz krok po kroku. Usuń krok lub umieść następny."
 }

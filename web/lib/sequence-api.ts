@@ -16,6 +16,12 @@ export interface SequenceProblem {
   question: string;
   formulas: string[];
   steps: SequenceStep[];
+  /**
+   * Count of correct steps in the solution — never their identity or order.
+   * The denominator for the build-progress ring. Optional because it is a
+   * newer server field; the client falls back to `steps.length` when absent.
+   */
+  solution_length?: number;
   placed_ids: string[];
   solved: boolean;
   mode: SequenceMode;

@@ -5592,6 +5592,12 @@
   "Assemble the whole solution, then check it.": "拼出完整解答，然后一次性检查。",
   "Place one step at a time and build a combo.": "一次放置一步，累积连对。",
   "Sound": "声音",
+  "Auto-check": "自动检查",
+  "Check each step as you place it.": "放置每一步时即时检查。",
+  "Play sounds for right and wrong steps": "播放对错步骤的提示音",
+  "Previously marked incorrect": "此前标记为错误",
+  "Previously marked correct": "此前标记为正确",
+  "Solution {{percent}}% built": "解答已构建 {{percent}}%",
   "This problem is checked as a whole. Use quest mode to place single steps.": "这道题按整体检查。若要逐步放置，请使用闯关模式。",
   "This problem is solved step by step. Remove a step or place the next one.": "这道题逐步求解。请移除一步或放置下一步。"
 }

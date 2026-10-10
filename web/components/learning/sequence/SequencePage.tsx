@@ -11,6 +11,7 @@ import { ProblemTimer } from "@/components/learning/sequence/ProblemTimer";
 import { ProgressRing } from "@/components/learning/sequence/ProgressRing";
 import { SequenceBanner } from "@/components/learning/sequence/SequenceBanner";
 import { SequenceModules } from "@/components/learning/sequence/SequenceModules";
+import { SolutionRing } from "@/components/learning/sequence/SolutionRing";
 import { SolveCelebration } from "@/components/learning/sequence/SolveCelebration";
 import { selectClass, selectOptionClass } from "@/components/settings/shared";
 import { listKnowledgeBases, type KnowledgeBaseSummary } from "@/features/knowledge/api/client";
@@ -25,11 +26,13 @@ import {
   removeSequenceStep,
   requestSequenceHint,
   SequenceRequestError,
+  type SequenceCheckResult,
   type SequenceMode,
   type SequenceOutline,
   type SequenceProblem,
   type SequenceStep,
 } from "@/lib/sequence-api";
+import { autocheckEnabled, setAutocheckEnabled } from "@/lib/sequence-autocheck";
 import { initialCombo, nextCombo, type ComboEvent, type ComboState } from "@/lib/sequence-combo";
 import {
   playBreak,
@@ -65,6 +68,20 @@ function placedClass(mark: StepMark | undefined): string {
   return "border-[var(--border)] bg-[var(--background)]";
 }
 
+/**
+ * Verdict memory for the Available-steps bank: a step a past check proved
+ * wrong is greyed behind a red edge, a step it proved right wears green.
+ * Both stay clickable — a step wrong at one position can be right at another.
+ */
+function bankClass(verdict: StepMark | undefined): string {
+  const base = "w-full rounded-lg border p-3 text-left disabled:opacity-60";
+  if (verdict === "correct") return `${base} border-[var(--success)] bg-[var(--success-surface)]`;
+  if (verdict === "incorrect") {
+    return `${base} border-[var(--destructive)] bg-[color-mix(in_srgb,var(--destructive)_14%,var(--background))] opacity-60 hover:opacity-100`;
+  }
+  return `${base} border-[var(--border)] bg-[var(--background)] hover:bg-[var(--muted)]`;
+}
+
 export function SequencePage() {
   const { t } = useTranslation();
   const outlineRequest = useRef(0);
@@ -81,6 +98,12 @@ export function SequencePage() {
   const [problem, setProblem] = useState<SequenceProblem | null>(null);
   const [assembled, setAssembled] = useState<string[]>([]);
   const [marks, setMarks] = useState<StepMark[] | null>(null);
+  // Verdict memory: the last proven mark per step id, surviving edits and
+  // removals so a returned bank step keeps its red/green history. Keyed by
+  // step id, wiped only on a new problem / leave / knowledge-base change.
+  const [verdicts, setVerdicts] = useState<Record<string, StepMark>>({});
+  const [autocheck, setAutocheck] = useState(false);
+  const [autoInFlight, setAutoInFlight] = useState(false);
   const [banner, setBanner] = useState<StepMark | null>(null);
   const [writing, setWriting] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -97,14 +120,23 @@ export function SequencePage() {
   const solvedCalledRef = useRef(false);
   const placementSeq = useRef(0);
   const startedAt = useRef(0);
+  // Auto-check debounce state: a timer handle plus a monotonic sequence so a
+  // slow response from an abandoned board is dropped like a stale placement.
+  const autocheckRef = useRef(false);
+  const autoTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const autoSeq = useRef(0);
   const reduceMotion = useReducedMotion();
 
   useEffect(() => {
-    // Read the persisted sound preference after mount so server and client
-    // render the same initial toggle state.
+    // Read the persisted sound and auto-check preferences after mount so
+    // server and client render the same initial toggle states.
     setSoundOn(soundEnabled());
+    const savedAutocheck = autocheckEnabled();
+    autocheckRef.current = savedAutocheck;
+    setAutocheck(savedAutocheck);
     return () => {
       if (auraTimer.current) clearTimeout(auraTimer.current);
+      if (autoTimer.current) clearTimeout(autoTimer.current);
     };
   }, []);
 
@@ -149,6 +181,10 @@ export function SequencePage() {
     setProblem(null);
     setAssembled([]);
     setMarks(null);
+    setVerdicts({});
+    setAutoInFlight(false);
+    autoSeq.current += 1;
+    if (autoTimer.current) clearTimeout(autoTimer.current);
     setBanner(null);
     setMessage("");
 
@@ -212,8 +248,29 @@ export function SequencePage() {
     const next = !soundOn;
     setSoundEnabled(next);
     setSoundOn(next);
-    // The toggle click is itself the gesture the autoplay rule asks for.
-    if (next) unlockAudio();
+    // The toggle click is itself the gesture the autoplay rule asks for, and a
+    // one-note blip proves the button did something the instant it is enabled.
+    if (next) {
+      unlockAudio();
+      playCombo(1);
+    }
+  }
+
+  function toggleAutocheck() {
+    const next = !autocheck;
+    setAutocheckEnabled(next);
+    autocheckRef.current = next;
+    setAutocheck(next);
+    if (next) scheduleAutocheck(assembled);
+    else cancelAutocheck();
+  }
+
+  /** Kill any parked auto-check so a late response cannot repaint the board. */
+  function cancelAutocheck() {
+    autoSeq.current += 1;
+    if (autoTimer.current) clearTimeout(autoTimer.current);
+    autoTimer.current = null;
+    setAutoInFlight(false);
   }
 
   /** Runs exactly once per problem, whichever response reports the solve. */
@@ -280,6 +337,8 @@ export function SequencePage() {
       setProblem(next);
       setAssembled([]);
       setMarks(null);
+      setVerdicts({});
+      cancelAutocheck();
       setBanner(null);
       setCelebration(null);
       setAura(null);
@@ -306,6 +365,81 @@ export function SequencePage() {
   function clearVerdict() {
     setMarks(null);
     setBanner(null);
+  }
+
+  /**
+   * Remember each graded step's verdict, keyed by id. Later checks overwrite
+   * earlier ones, so a step proven wrong at one position and right at another
+   * ends up green. This map is the bank's memory; `marks` stays per-check.
+   */
+  function recordVerdicts(ids: readonly string[], graded: readonly StepMark[]) {
+    setVerdicts(previous => {
+      const next = { ...previous };
+      ids.forEach((id, index) => {
+        const mark = graded[index];
+        if (mark) next[id] = mark;
+      });
+      return next;
+    });
+  }
+
+  /** Shared landing for every graded practice check — manual button or auto. */
+  function applyCheckResult(result: SequenceCheckResult, ids: readonly string[]) {
+    const solved = result.solved || result.problem.solved;
+    const anyWrong = result.marks.includes("incorrect");
+    setProblem({ ...result.problem, solved });
+    setMarks(result.marks);
+    // A partial build with no misses is praise, not "not quite" — the banner
+    // and the sound must tell the same story on every auto-check.
+    setBanner(anyWrong ? "incorrect" : "correct");
+    recordVerdicts(ids, result.marks);
+    if (solved) {
+      celebrate({ ...result.problem, solved });
+      refreshOutlineProgress(result.problem.progress);
+    } else if (anyWrong) {
+      playBreak();
+    } else if (result.marks.length > 0) {
+      // The whole build is correct so far: the ladder rises as it grows.
+      playCombo(result.marks.length);
+    }
+  }
+
+  /**
+   * Practice-mode auto-check: after the learner pauses, grade the board they
+   * have built and paint marks live. Deliberately avoids the busy guard so
+   * placements never block; staleness is handled by view + autoSeq instead.
+   */
+  function scheduleAutocheck(ids: readonly string[]) {
+    if (autoTimer.current) clearTimeout(autoTimer.current);
+    autoSeq.current += 1;
+    if (!autocheckRef.current || ids.length === 0) {
+      setAutoInFlight(false);
+      return;
+    }
+    const viewId = view.current;
+    const seq = autoSeq.current;
+    const snapshot = [...ids];
+    setAutoInFlight(true);
+    autoTimer.current = setTimeout(() => {
+      autoTimer.current = null;
+      void runAutocheck(snapshot, viewId, seq);
+    }, 600);
+  }
+
+  async function runAutocheck(ids: string[], viewId: number, seq: number) {
+    const fresh = () => view.current === viewId && seq === autoSeq.current;
+    if (!fresh() || !autocheckRef.current) return;
+    if (!problem || problem.mode !== "practice" || problem.solved || busyRef.current) return;
+    try {
+      const result = await checkSequenceAnswer(problem.problem_id, ids);
+      if (!fresh()) return;
+      setAutoInFlight(false);
+      applyCheckResult(result, ids);
+    } catch {
+      // An auto-check failure stays quiet: the manual Check button is right
+      // there, and a transport blip must not shout over the learner's flow.
+      if (fresh()) setAutoInFlight(false);
+    }
   }
 
   async function placeQuestStep(stepId: string) {
@@ -382,8 +516,11 @@ export function SequencePage() {
       void placeQuestStep(stepId);
       return;
     }
-    setAssembled(ids => (ids.includes(stepId) ? ids : [...ids, stepId]));
+    if (assembled.includes(stepId)) return;
+    const next = [...assembled, stepId];
+    setAssembled(next);
     clearVerdict();
+    scheduleAutocheck(next);
   }
 
   function removePlaced(stepId: string) {
@@ -392,8 +529,10 @@ export function SequencePage() {
       void removeQuestStep(stepId);
       return;
     }
-    setAssembled(ids => ids.filter(id => id !== stepId));
+    const next = assembled.filter(id => id !== stepId);
+    setAssembled(next);
     clearVerdict();
+    scheduleAutocheck(next);
   }
 
   function leaveProblem() {
@@ -402,9 +541,11 @@ export function SequencePage() {
     writingRef.current = false;
     setWriting(false);
     releaseBusy();
+    cancelAutocheck();
     setProblem(null);
     setAssembled([]);
     setMarks(null);
+    setVerdicts({});
     setBanner(null);
     setMessage("");
     setDialog(null);
@@ -416,21 +557,17 @@ export function SequencePage() {
 
   async function checkAnswer() {
     if (!problem || problem.solved || busy || assembled.length === 0) return;
+    // A manual check supersedes any parked auto-check for the same board.
+    cancelAutocheck();
     const viewId = view.current;
+    const ids = [...assembled];
     enterBusy();
     setMessage("");
     setBanner(null);
     try {
-      const result = await checkSequenceAnswer(problem.problem_id, assembled);
+      const result = await checkSequenceAnswer(problem.problem_id, ids);
       if (view.current !== viewId) return;
-      const solved = result.solved || result.problem.solved;
-      setProblem({ ...result.problem, solved });
-      setMarks(result.marks);
-      setBanner(solved ? "correct" : "incorrect");
-      if (solved) {
-        celebrate({ ...result.problem, solved });
-        refreshOutlineProgress(result.problem.progress);
-      }
+      applyCheckResult(result, ids);
     } catch (error) {
       if (view.current !== viewId) return;
       if (error instanceof SequenceRequestError && error.status === 409 && solvedCalledRef.current) {
@@ -480,6 +617,20 @@ export function SequencePage() {
   const questMode = problem?.mode === "quest";
   const orderedIds = problem ? (questMode ? problem.placed_ids : assembled) : [];
   const bank = problem?.steps.filter(step => !orderedIds.includes(step.id)) ?? [];
+  // Ring denominator: the server's correct-step count when it ships one, else
+  // the whole tile box (never zero-divide, never exceed what is knowable).
+  const solutionTotal = problem
+    ? problem.solution_length && problem.solution_length > 0
+      ? problem.solution_length
+      : problem.steps.length
+    : 0;
+  // Numerator: verified-correct steps once a check has graded the board;
+  // before any check, quest counts its accepted prefix and practice counts
+  // what the learner has placed so far.
+  const builtCount = Math.min(
+    marks ? marks.filter(mark => mark === "correct").length : orderedIds.length,
+    solutionTotal,
+  );
   const placed = orderedIds
     .map((id, index) => {
       const step = byId.get(id);
@@ -550,6 +701,21 @@ export function SequencePage() {
               ? t("Assemble the whole solution, then check it.")
               : t("Place one step at a time and build a combo.")}
           </p>
+          {mode === "practice" && (
+            <button
+              type="button"
+              aria-pressed={autocheck}
+              title={t("Check each step as you place it.")}
+              className={`mt-1 justify-self-start rounded-lg border px-3 py-1 text-xs ${
+                autocheck
+                  ? "border-[var(--primary)] bg-[var(--primary)] text-[var(--primary-foreground)]"
+                  : "border-[var(--border)] bg-[var(--background)] text-[var(--foreground)]"
+              }`}
+              onClick={toggleAutocheck}
+            >
+              {t("Auto-check")}
+            </button>
+          )}
         </div>
         {knowledgeBase && outlinePhase !== "idle" && (
           <button
@@ -642,9 +808,11 @@ export function SequencePage() {
             <div className="flex items-center gap-4">
               <ProgressRing solved={problem.progress.solved} goal={problem.progress.goal} />
               <ProblemTimer key={problem.problem_id} solved={problem.solved} />
+              <SolutionRing built={builtCount} total={solutionTotal} />
               <button
                 type="button"
                 aria-pressed={soundOn}
+                title={t("Play sounds for right and wrong steps")}
                 className={`rounded-lg border px-3 py-1 text-sm ${
                   soundOn
                     ? "border-[var(--primary)] bg-[var(--primary)] text-[var(--primary-foreground)]"
@@ -712,22 +880,37 @@ export function SequencePage() {
             <section className="rounded-xl border border-[var(--border)] bg-[var(--background)] p-4">
               <h2 className="mb-3 text-center text-sm font-semibold">{t("Available steps")}</h2>
               <ul className="space-y-2">
-                {bank.map(step => (
-                  <li key={step.id}>
-                    <button
-                      type="button"
-                      className="w-full rounded-lg border border-[var(--border)] bg-[var(--background)] p-3 text-left hover:bg-[var(--muted)] disabled:opacity-60"
-                      onClick={() => addStep(step.id)}
-                      disabled={busy || problem.solved}
-                    >
-                      <InlineMarkdown content={stepText(step, style)} />
-                      <span className="sr-only">{t("Add this step to your solution")}</span>
-                    </button>
-                  </li>
-                ))}
+                {bank.map(step => {
+                  const verdict = verdicts[step.id];
+                  return (
+                    <li key={step.id}>
+                      <button
+                        type="button"
+                        className={bankClass(verdict)}
+                        onClick={() => addStep(step.id)}
+                        disabled={busy || problem.solved}
+                      >
+                        <InlineMarkdown content={stepText(step, style)} />
+                        <span className="sr-only">{t("Add this step to your solution")}</span>
+                        {verdict === "incorrect" && (
+                          <span className="sr-only">{t("Previously marked incorrect")}</span>
+                        )}
+                        {verdict === "correct" && (
+                          <span className="sr-only">{t("Previously marked correct")}</span>
+                        )}
+                      </button>
+                    </li>
+                  );
+                })}
               </ul>
             </section>
           </div>
+
+          {autoInFlight && (
+            <p role="status" className="text-xs text-[var(--muted-foreground)]">
+              {t("Checking…")}
+            </p>
+          )}
 
           {banner && <SequenceBanner verdict={banner} combo={combo.combo} onDismiss={() => setBanner(null)} />}
 
