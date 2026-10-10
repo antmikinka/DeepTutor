@@ -183,6 +183,10 @@ async def test_public_problem_hides_the_order_until_it_is_solved(tmp_path):
     assert view["explanation"] is None
     assert {step["id"] for step in view["steps"]} == {step["id"] for step in saved["steps"]}
     assert all("role" not in step and "evidence" not in step for step in view["steps"])
+    # The build-progress denominator ships as a bare count — no order leaks:
+    # it stays correct across place/remove and never names the answer steps.
+    assert view["solution_length"] == len(saved["correct_ids"])
+    assert view["solution_length"] <= len(view["steps"])
 
     wrong = next(step["id"] for step in saved["steps"] if step["role"] == "distractor")
     rejected = place_step(store, view["problem_id"], wrong, 0)

@@ -94,7 +94,12 @@ def parse_problem(data: Any, corpus: str) -> _ProblemIn:
 
 
 def public_problem(record: dict[str, Any]) -> dict[str, Any]:
-    """Learner-facing problem. No roles, no evidence, no answer order."""
+    """Learner-facing problem. No roles, no evidence, no answer order.
+
+    ``solution_length`` is the *count* of correct steps only — never their
+    identity or order — so the client can render a build-progress ring and a
+    greyed-out bank without learning anything that leaks the answer.
+    """
     solved = bool(record.get("solved"))
     steps = []
     for step in record.get("steps") or []:
@@ -110,6 +115,7 @@ def public_problem(record: dict[str, Any]) -> dict[str, Any]:
         "question": record["question"],
         "formulas": list(record.get("formulas") or []),
         "steps": steps,
+        "solution_length": len(record.get("correct_ids") or []),
         "placed_ids": list(record.get("placed_ids") or []),
         "solved": solved,
         "mode": "quest" if record.get("mode") == "quest" else "practice",
