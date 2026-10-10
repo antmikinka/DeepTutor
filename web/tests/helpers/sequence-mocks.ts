@@ -23,6 +23,7 @@ export const QUEST_PROBLEM: SequenceProblem = {
     { id: "s_inner", explanation: "Multiply by the inner derivative", math: "$2x\\cos(x^2)$" },
     { id: "s_trap", explanation: "A tempting mistake", math: "$2x\\cos(x)$" },
   ],
+  solution_length: 2,
   placed_ids: [],
   solved: false,
   mode: "quest",

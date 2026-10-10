@@ -86,6 +86,7 @@ const OUTLINE: SequenceOutline = {
 const FOUR_PROBLEM: SequenceProblem = {
   ...QUEST_PROBLEM,
   problem_id: "q4",
+  solution_length: 4,
   steps: [
     { id: "s_a", explanation: "First move", math: "$a$" },
     { id: "s_b", explanation: "Second move", math: "$b$" },
