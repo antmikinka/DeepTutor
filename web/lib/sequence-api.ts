@@ -9,7 +9,7 @@ export interface SequenceStep {
   math: string;
 }
 
-export type SequenceMode = "practice" | "quest";
+export type SequenceMode = "practice" | "quest" | "guided";
 
 export interface SequenceProblem {
   problem_id: string;
@@ -54,6 +54,22 @@ export interface SequenceCheckResult {
 export interface PlaceResult {
   accepted: boolean;
   problem: SequenceProblem;
+}
+
+/** The approach explanation shown before any step of a guided problem. */
+export interface WalkthroughIntro {
+  intro: string;
+  total: number;
+}
+
+/** One demonstrated correct step, revealed lazily and cached server-side. */
+export interface WalkthroughReveal {
+  index: number;
+  step_id: string;
+  math: string;
+  explanation: string;
+  done: boolean;
+  total: number;
 }
 
 export class SequenceRequestError extends Error {
@@ -155,4 +171,18 @@ export function explainSequenceStep(problemId: string, stepId: string) {
   return request<{ explanation: string }>(`/problems/${encodeURIComponent(problemId)}/explain`, {
     step_id: stepId,
   });
+}
+
+export function requestWalkthroughIntro(problemId: string) {
+  return request<WalkthroughIntro>(
+    `/problems/${encodeURIComponent(problemId)}/walkthrough/intro`,
+    undefined,
+  );
+}
+
+export function requestWalkthroughReveal(problemId: string, index: number) {
+  return request<WalkthroughReveal>(
+    `/problems/${encodeURIComponent(problemId)}/walkthrough/reveal`,
+    { index },
+  );
 }

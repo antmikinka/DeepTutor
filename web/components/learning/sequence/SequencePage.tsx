@@ -25,12 +25,15 @@ import {
   rebuildSequenceOutline,
   removeSequenceStep,
   requestSequenceHint,
+  requestWalkthroughIntro,
+  requestWalkthroughReveal,
   SequenceRequestError,
   type SequenceCheckResult,
   type SequenceMode,
   type SequenceOutline,
   type SequenceProblem,
   type SequenceStep,
+  type WalkthroughReveal,
 } from "@/lib/sequence-api";
 import { autocheckEnabled, setAutocheckEnabled } from "@/lib/sequence-autocheck";
 import { initialCombo, nextCombo, type ComboEvent, type ComboState } from "@/lib/sequence-combo";
@@ -47,6 +50,12 @@ import { Dialog } from "@/shared/ui/Dialog";
 type StepStyle = "word" | "symbol";
 type StepMark = "correct" | "incorrect";
 type OutlinePhase = "idle" | "loading" | "reading" | "ready" | "error";
+/**
+ * Guided mode phases: the walkthrough is fetched ("loading"), demonstrated
+ * one reveal at a time ("walkthrough"), then handed to the learner
+ * ("assembly"), which behaves exactly like practice mode.
+ */
+type GuidePhase = "idle" | "loading" | "walkthrough" | "assembly";
 
 interface CelebrationData {
   seconds: number;
@@ -104,6 +113,14 @@ export function SequencePage() {
   const [verdicts, setVerdicts] = useState<Record<string, StepMark>>({});
   const [autocheck, setAutocheck] = useState(false);
   const [autoInFlight, setAutoInFlight] = useState(false);
+  // Guided mode: the model demonstrates first, the learner rebuilds second.
+  // The walkthrough panel is the only place the secret order ever reaches the
+  // client, and "Your turn" swaps it for a plain practice-style board.
+  const [guidePhase, setGuidePhase] = useState<GuidePhase>("idle");
+  const [guideIntro, setGuideIntro] = useState("");
+  const [guideTotal, setGuideTotal] = useState(0);
+  const [guideReveals, setGuideReveals] = useState<WalkthroughReveal[]>([]);
+  const [guideBusy, setGuideBusy] = useState(false);
   const [banner, setBanner] = useState<StepMark | null>(null);
   const [writing, setWriting] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -187,6 +204,11 @@ export function SequencePage() {
     if (autoTimer.current) clearTimeout(autoTimer.current);
     setBanner(null);
     setMessage("");
+    setGuidePhase("idle");
+    setGuideIntro("");
+    setGuideTotal(0);
+    setGuideReveals([]);
+    setGuideBusy(false);
 
     void (async () => {
       const current = () => !cancelled && outlineRequest.current === id;
@@ -345,6 +367,15 @@ export function SequencePage() {
       comboDispatch({ type: "reset" });
       solvedCalledRef.current = false;
       startedAt.current = Date.now();
+      setGuideIntro("");
+      setGuideTotal(0);
+      setGuideReveals([]);
+      if (next.mode === "guided") {
+        setGuidePhase("loading");
+        void beginWalkthrough(next, viewId);
+      } else {
+        setGuidePhase("idle");
+      }
     } catch (error) {
       if (view.current !== viewId) return;
       // The server answers with fixed English sentences that double as i18n
@@ -429,7 +460,7 @@ export function SequencePage() {
   async function runAutocheck(ids: string[], viewId: number, seq: number) {
     const fresh = () => view.current === viewId && seq === autoSeq.current;
     if (!fresh() || !autocheckRef.current) return;
-    if (!problem || problem.mode !== "practice" || problem.solved || busyRef.current) return;
+    if (!problem || (problem.mode !== "practice" && problem.mode !== "guided") || problem.solved || busyRef.current) return;
     try {
       const result = await checkSequenceAnswer(problem.problem_id, ids);
       if (!fresh()) return;
@@ -553,6 +584,11 @@ export function SequencePage() {
     setAura(null);
     comboDispatch({ type: "reset" });
     solvedCalledRef.current = false;
+    setGuidePhase("idle");
+    setGuideIntro("");
+    setGuideTotal(0);
+    setGuideReveals([]);
+    setGuideBusy(false);
   }
 
   async function checkAnswer() {
@@ -614,7 +650,74 @@ export function SequencePage() {
     }
   }
 
+  /** Fetch the approach intro; a failed intro still opens the panel so the
+   * step-by-step demonstration and the skip button remain available. */
+  async function beginWalkthrough(target: SequenceProblem, viewId: number) {
+    setGuideBusy(true);
+    try {
+      const intro = await requestWalkthroughIntro(target.problem_id);
+      if (view.current !== viewId) return;
+      setGuideIntro(intro.intro);
+      setGuideTotal(intro.total);
+    } catch (error) {
+      if (view.current !== viewId) return;
+      setGuideTotal(target.solution_length || target.steps.length);
+      setMessage(
+        error instanceof Error && error.message
+          ? t(error.message)
+          : t("Could not start the walkthrough."),
+      );
+    } finally {
+      if (view.current === viewId) {
+        setGuideBusy(false);
+        setGuidePhase("walkthrough");
+      }
+    }
+  }
+
+  /** Demonstrate the next correct step, in order, exactly once per index. */
+  async function revealNextStep() {
+    if (!problem || problem.mode !== "guided" || guideBusy) return;
+    const viewId = view.current;
+    const index = guideReveals.length;
+    setGuideBusy(true);
+    setMessage("");
+    try {
+      const reveal = await requestWalkthroughReveal(problem.problem_id, index);
+      if (view.current !== viewId) return;
+      // A duplicate arrival for an already-shown index is dropped, never
+      // appended twice, even if two clicks raced the busy flag.
+      setGuideReveals(previous => (previous.length === index ? [...previous, reveal] : previous));
+    } catch (error) {
+      if (view.current !== viewId) return;
+      setMessage(
+        error instanceof Error && error.message ? t(error.message) : t("Could not show that step."),
+      );
+    } finally {
+      if (view.current === viewId) setGuideBusy(false);
+    }
+  }
+
+  /** Hand the board to the learner: same problem, rebuilt from memory. */
+  function yourTurn() {
+    // Invalidate any in-flight walkthrough request: the demo is over.
+    view.current += 1;
+    setGuideBusy(false);
+    setGuidePhase("assembly");
+    setGuideReveals([]);
+    setAssembled([]);
+    setMarks(null);
+    setVerdicts({});
+    cancelAutocheck();
+    setBanner(null);
+    setMessage("");
+    // The clock and the celebrate-seconds measure THEIR rebuild, not the demo.
+    startedAt.current = Date.now();
+  }
+
   const questMode = problem?.mode === "quest";
+  const guidedDemo =
+    problem?.mode === "guided" && guidePhase !== "assembly" && !problem.solved;
   const orderedIds = problem ? (questMode ? problem.placed_ids : assembled) : [];
   const bank = problem?.steps.filter(step => !orderedIds.includes(step.id)) ?? [];
   // Ring denominator: the server's correct-step count when it ships one, else
@@ -695,13 +798,24 @@ export function SequencePage() {
             >
               {t("Quest")}
             </button>
+            <button
+              type="button"
+              className={styleButton(mode === "guided")}
+              aria-pressed={mode === "guided"}
+              disabled={!!problem}
+              onClick={() => setMode("guided")}
+            >
+              {t("Guided")}
+            </button>
           </div>
           <p className="text-xs text-[var(--muted-foreground)]">
             {mode === "practice"
               ? t("Assemble the whole solution, then check it.")
-              : t("Place one step at a time and build a combo.")}
+              : mode === "quest"
+                ? t("Place one step at a time and build a combo.")
+                : t("Watch the model solve it first, then rebuild it yourself.")}
           </p>
-          {mode === "practice" && (
+          {(mode === "practice" || mode === "guided") && (
             <button
               type="button"
               aria-pressed={autocheck}
@@ -807,8 +921,8 @@ export function SequencePage() {
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-4">
               <ProgressRing solved={problem.progress.solved} goal={problem.progress.goal} />
-              <ProblemTimer key={problem.problem_id} solved={problem.solved} />
-              <SolutionRing built={builtCount} total={solutionTotal} />
+              {!guidedDemo && <ProblemTimer key={problem.problem_id} solved={problem.solved} />}
+              {!guidedDemo && <SolutionRing built={builtCount} total={solutionTotal} />}
               <button
                 type="button"
                 aria-pressed={soundOn}
@@ -833,6 +947,68 @@ export function SequencePage() {
             </div>
           </div>
 
+          {guidedDemo && (
+            <section className="rounded-xl border border-[var(--border)] bg-[var(--background)] p-5">
+              <h2 className="mb-3 text-base font-semibold">{t("Walkthrough")}</h2>
+              {guidePhase === "loading" && (
+                <p role="status" className="text-sm text-[var(--muted-foreground)]">
+                  {t("Loading the walkthrough…")}
+                </p>
+              )}
+              {guidePhase !== "loading" && (
+                <>
+                  {guideIntro && (
+                    <div className="mb-4 rounded-lg border border-[var(--border)] bg-[var(--muted)] p-3">
+                      <h3 className="mb-1 text-sm font-semibold">
+                        {t("How to approach this problem")}
+                      </h3>
+                      <MarkdownRenderer content={guideIntro} enableMath />
+                    </div>
+                  )}
+                  <ol className="space-y-2">
+                    {guideReveals.map(reveal => (
+                      <li
+                        key={reveal.step_id}
+                        className="rounded-lg border border-[var(--primary)] bg-[var(--background)] p-3"
+                      >
+                        <p className="mb-1 text-xs font-semibold text-[var(--primary)]">
+                          {t("Step {{shown}} of {{total}} demonstrated", {
+                            shown: reveal.index + 1,
+                            total: reveal.total,
+                          })}
+                        </p>
+                        <InlineMarkdown content={reveal.math} />
+                        <div className="mt-1 text-sm text-[var(--muted-foreground)]">
+                          <MarkdownRenderer content={reveal.explanation} enableMath />
+                        </div>
+                      </li>
+                    ))}
+                  </ol>
+                  <div className="mt-4 flex flex-wrap gap-3">
+                    <button
+                      type="button"
+                      className="rounded-lg border border-[var(--border)] bg-[var(--background)] px-4 py-2 text-sm disabled:opacity-60"
+                      onClick={() => void revealNextStep()}
+                      disabled={
+                        guideBusy || (guideTotal > 0 && guideReveals.length >= guideTotal)
+                      }
+                    >
+                      {t("Show next step")}
+                    </button>
+                    <button
+                      type="button"
+                      className="rounded-lg bg-[var(--primary)] px-4 py-2 text-sm text-[var(--primary-foreground)]"
+                      onClick={yourTurn}
+                    >
+                      {guideReveals.length > 0 ? t("Your turn") : t("I've got this")}
+                    </button>
+                  </div>
+                </>
+              )}
+            </section>
+          )}
+
+          {!guidedDemo && (
           <div className="grid gap-4 lg:grid-cols-2">
             <section
               className={`rounded-xl border border-[var(--border)] bg-[var(--background)] p-4 ${auraClass} ${
@@ -905,8 +1081,9 @@ export function SequencePage() {
               </ul>
             </section>
           </div>
+          )}
 
-          {autoInFlight && (
+          {!guidedDemo && autoInFlight && (
             <p role="status" className="text-xs text-[var(--muted-foreground)]">
               {t("Checking…")}
             </p>
@@ -914,6 +1091,7 @@ export function SequencePage() {
 
           {banner && <SequenceBanner verdict={banner} combo={combo.combo} onDismiss={() => setBanner(null)} />}
 
+          {!guidedDemo && (
           <div className="flex flex-wrap justify-end gap-3">
             {!problem.solved && (
               <button
@@ -946,6 +1124,7 @@ export function SequencePage() {
               </button>
             )}
           </div>
+          )}
 
           {problem.solved && problem.explanation && (
             <section className="rounded-xl border border-[var(--border)] bg-[var(--background)] p-5">
