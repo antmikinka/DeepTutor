@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field, ValidationError
@@ -17,6 +18,8 @@ from deeptutor.learning.sequence.service import (
     place_step,
     read_outline,
     remove_step,
+    walkthrough_intro,
+    walkthrough_reveal,
 )
 from deeptutor.learning.sequence.store import SequenceStore
 from deeptutor.services.path_service import get_path_service
@@ -27,6 +30,7 @@ router = APIRouter()
 class CreateProblem(BaseModel):
     knowledge_base: str = Field(min_length=1, max_length=200)
     topic: str = Field(min_length=1, max_length=200)
+    mode: Literal["practice", "quest", "guided"] = "practice"
 
 
 class KnowledgeBaseName(BaseModel):
@@ -48,6 +52,10 @@ class CheckSteps(BaseModel):
 
 class HintSteps(BaseModel):
     step_ids: list[str] = Field(default_factory=list, max_length=12)
+
+
+class RevealIndex(BaseModel):
+    index: int = Field(ge=0, le=11)
 
 
 def _store() -> SequenceStore:
@@ -95,7 +103,7 @@ async def create_outline(body: KnowledgeBaseName):
 @router.post("/problems")
 async def create_problem(body: CreateProblem):
     try:
-        return await generate_problem(body.knowledge_base, body.topic, _store())
+        return await generate_problem(body.knowledge_base, body.topic, _store(), mode=body.mode)
     except SequenceError as exc:
         _raise(exc)
 
@@ -137,5 +145,21 @@ async def get_hint(problem_id: str, request: Request):
 async def explain(problem_id: str, body: StepId):
     try:
         return await explain_step(_store(), problem_id, body.step_id)
+    except SequenceError as exc:
+        _raise(exc)
+
+
+@router.post("/problems/{problem_id}/walkthrough/intro")
+async def walkthrough_intro_view(problem_id: str):
+    try:
+        return await walkthrough_intro(_store(), problem_id)
+    except SequenceError as exc:
+        _raise(exc)
+
+
+@router.post("/problems/{problem_id}/walkthrough/reveal")
+async def walkthrough_reveal_view(problem_id: str, body: RevealIndex):
+    try:
+        return await walkthrough_reveal(_store(), problem_id, body.index)
     except SequenceError as exc:
         _raise(exc)

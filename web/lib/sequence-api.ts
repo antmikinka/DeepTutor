@@ -9,13 +9,22 @@ export interface SequenceStep {
   math: string;
 }
 
+export type SequenceMode = "practice" | "quest" | "guided";
+
 export interface SequenceProblem {
   problem_id: string;
   question: string;
   formulas: string[];
   steps: SequenceStep[];
+  /**
+   * Count of correct steps in the solution — never their identity or order.
+   * The denominator for the build-progress ring. Optional because it is a
+   * newer server field; the client falls back to `steps.length` when absent.
+   */
+  solution_length?: number;
   placed_ids: string[];
   solved: boolean;
+  mode: SequenceMode;
   explanation: string | null;
   progress: { solved: number; goal: number };
   sources: { title: string }[];
@@ -45,6 +54,22 @@ export interface SequenceCheckResult {
 export interface PlaceResult {
   accepted: boolean;
   problem: SequenceProblem;
+}
+
+/** The approach explanation shown before any step of a guided problem. */
+export interface WalkthroughIntro {
+  intro: string;
+  total: number;
+}
+
+/** One demonstrated correct step, revealed lazily and cached server-side. */
+export interface WalkthroughReveal {
+  index: number;
+  step_id: string;
+  math: string;
+  explanation: string;
+  done: boolean;
+  total: number;
 }
 
 export class SequenceRequestError extends Error {
@@ -83,8 +108,16 @@ async function request<T>(path: string, body?: unknown, method: "GET" | "POST" =
   return response.json() as Promise<T>;
 }
 
-export function createSequenceProblem(knowledgeBase: string, topic: string) {
-  return request<SequenceProblem>("/problems", { knowledge_base: knowledgeBase, topic });
+export function createSequenceProblem(
+  knowledgeBase: string,
+  topic: string,
+  mode: SequenceMode = "practice",
+) {
+  return request<SequenceProblem>("/problems", {
+    knowledge_base: knowledgeBase,
+    topic,
+    mode,
+  });
 }
 
 export function placeSequenceStep(problemId: string, stepId: string, index: number) {
@@ -138,4 +171,18 @@ export function explainSequenceStep(problemId: string, stepId: string) {
   return request<{ explanation: string }>(`/problems/${encodeURIComponent(problemId)}/explain`, {
     step_id: stepId,
   });
+}
+
+export function requestWalkthroughIntro(problemId: string) {
+  return request<WalkthroughIntro>(
+    `/problems/${encodeURIComponent(problemId)}/walkthrough/intro`,
+    undefined,
+  );
+}
+
+export function requestWalkthroughReveal(problemId: string, index: number) {
+  return request<WalkthroughReveal>(
+    `/problems/${encodeURIComponent(problemId)}/walkthrough/reveal`,
+    { index },
+  );
 }

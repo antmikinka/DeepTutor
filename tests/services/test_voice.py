@@ -148,6 +148,33 @@ def test_strip_markdown_drops_code_and_unwraps_links() -> None:
     assert "*" not in out
 
 
+def test_strip_markdown_drops_horizontal_rules() -> None:
+    md = "Approach the problem first.\n\n---\n\n### Solution 1. Do the thing."
+    out = strip_markdown_for_speech(md)
+    assert "---" not in out
+    assert "#" not in out
+    assert "Approach the problem first." in out
+    assert "Solution 1. Do the thing." in out
+
+
+def test_strip_markdown_drops_rules_and_headings_flattened_mid_line() -> None:
+    # Upstream callers may hand us a newline-flattened blob; "###" and "---"
+    # between spaces must never be spoken as "hash hash hash".
+    out = strip_markdown_for_speech(
+        "Approach This is an elementary probability problem. --- ### Solution 1. Identify the sample space."
+    )
+    assert "#" not in out
+    assert "---" not in out
+    assert "Approach This is an elementary probability problem." in out
+    assert "Solution 1. Identify the sample space." in out
+
+
+def test_strip_markdown_keeps_hashes_and_dashes_inside_words() -> None:
+    out = strip_markdown_for_speech(r"Use issue #42 and the range a---b stays put.")
+    assert "#42" in out
+    assert "a---b" in out
+
+
 def test_strip_markdown_does_not_speak_asterisks_for_bold() -> None:
     out = strip_markdown_for_speech("This is **bold** and *italic* and ** $x^2$ **.")
     assert "*" not in out
