@@ -13,6 +13,7 @@ from deeptutor.learning.sequence.grading import placement_accepted, sequence_com
 from deeptutor.learning.sequence.outline import modules_from_files
 from deeptutor.learning.sequence.schema import SequenceError, parse_problem
 from deeptutor.learning.sequence.service import (
+    _shape_intro,
     build_outline,
     check_answer,
     explain_step,
@@ -827,7 +828,7 @@ async def test_walkthrough_intro_explains_the_approach_once(tmp_path):
     second = await walkthrough_intro(store, view["problem_id"], complete_text=complete_text)
     assert second["intro"] == first["intro"]
     assert calls["n"] == 1
-    assert store.load(view["problem_id"])["walkthrough"]["intro"] == first["intro"]
+    assert store.load(view["problem_id"])["walkthrough"]["intro_v2"] == first["intro"]
 
 
 @pytest.mark.asyncio
@@ -841,6 +842,46 @@ async def test_walkthrough_intro_rejects_an_empty_model_reply(tmp_path):
         await walkthrough_intro(store, view["problem_id"], complete_text=complete_text)
     assert exc.value.status == 502
     assert "walkthrough" not in store.load(view["problem_id"])
+
+
+def test_shape_intro_cuts_the_solution_the_model_appends():
+    # Models paste the whole worked solution after the approach even when the
+    # prompt says not to; everything from the rule/Solution heading onward goes.
+    text = (
+        "Approach This is an elementary probability problem.\n"
+        "---\n"
+        "### Solution 1. Identify the sample space and its cardinality:\n"
+        "$$S = {1,"
+    )
+    intro = _shape_intro(text)
+    assert intro == "Approach This is an elementary probability problem."
+    assert "---" not in intro
+    assert "###" not in intro
+    assert "$" not in intro
+
+
+def test_shape_intro_keeps_newlines_so_markdown_can_render():
+    # Flattening newlines turned headings into literal "###" punctuation in the
+    # card; the shaped intro must stay block-structured.
+    text = "## How to approach\n\nUse the chain rule.\nLet $u = g(x)$."
+    intro = _shape_intro(text)
+    assert "## How to approach\n\nUse the chain rule.\nLet $u = g(x)$." == intro
+
+
+def test_shape_intro_never_leaves_unbalanced_math_delimiters():
+    # The 700-char cap lands inside a math island: the intro must fall back to
+    # before the opening "$" instead of leaking a lone delimiter to the card.
+    filler = "word " * 138  # exactly 690 chars
+    text = filler + "$S = {1, 2, 3, 4, 5, 6}$ and a very long unclosed tail"
+    intro = _shape_intro(text)
+    assert len(intro) <= 700
+    assert intro.count("$") == 0
+    assert intro == filler.strip()
+
+
+def test_shape_intro_handles_empty_and_whitespace_input():
+    assert _shape_intro("") == ""
+    assert _shape_intro("   \n\n  ") == ""
 
 
 @pytest.mark.asyncio

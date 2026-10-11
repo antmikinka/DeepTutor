@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import re
 import secrets
 from typing import Any
 
@@ -680,6 +681,42 @@ def _require_guided(record: dict[str, Any]) -> list[str]:
     return [str(step_id) for step_id in record.get("correct_ids") or []]
 
 
+_INTRO_MAX_CHARS = 700
+
+# Models paste the whole worked solution after the approach even when told
+# not to. A rule line or a Solution/Step heading marks where approach ends.
+_SOLUTION_START = re.compile(
+    r"^\s*(?:-{3,}|\*{3,}|_{3,}|#{1,6}\s*(?:solution|step)\b)",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _shape_intro(text: str) -> str:
+    """Trim the model's approach note into Markdown the card can render.
+
+    Newlines survive: flattening them turns headings and display math into
+    literal inline punctuation (``###`` and ``$$`` mid-paragraph), which no
+    renderer can recover. The solution section the model appends is cut, and
+    the length cap never lands inside a math island or leaves an unbalanced
+    ``$`` / ``$$`` behind.
+    """
+    out = str(text or "")
+    cut = _SOLUTION_START.search(out)
+    if cut and cut.start() > 0:
+        out = out[: cut.start()]
+    out = "\n".join(line.strip() for line in out.splitlines())
+    out = re.sub(r"[ \t]+", " ", out)
+    out = re.sub(r"\n{3,}", "\n\n", out).strip()
+    if len(out) > _INTRO_MAX_CHARS:
+        window = out[:_INTRO_MAX_CHARS]
+        boundary = max(window.rfind("\n"), window.rfind(" "))
+        out = window[: boundary + 1].strip() if boundary > _INTRO_MAX_CHARS // 2 else window
+    for delimiter in ("$$", "$"):
+        if out.count(delimiter) % 2:
+            out = out[: out.rfind(delimiter)].rstrip()
+    return out.strip()
+
+
 async def walkthrough_intro(
     store: SequenceStore,
     problem_id: str,
@@ -689,7 +726,7 @@ async def walkthrough_intro(
     """Explain how to approach the problem, before any step is shown."""
     record = _require(store, problem_id)
     correct_ids = _require_guided(record)
-    cached = (record.get("walkthrough") or {}).get("intro")
+    cached = (record.get("walkthrough") or {}).get("intro_v2")
     if isinstance(cached, str) and cached.strip():
         return {"intro": cached.strip(), "total": len(correct_ids)}
     prompt = approach_prompt(record["question"], record.get("context") or "")
@@ -702,13 +739,15 @@ async def walkthrough_intro(
         max_tokens=300,
         max_retries=0,
     )
-    intro = " ".join(str(text or "").split())[:700]
+    intro = _shape_intro(text)
     if not intro:
         raise SequenceError(502, "The tutor could not introduce this problem yet. Try again.")
 
     def cache(saved: dict[str, Any]) -> dict[str, str]:
         walk = saved.setdefault("walkthrough", {})
-        walk["intro"] = intro
+        # v2: v1 cached a newline-flattened blob that rendered as literal
+        # Markdown punctuation; old values are ignored and regenerated.
+        walk["intro_v2"] = intro
         return {"intro": intro}
 
     _mutate(store, problem_id, cache)

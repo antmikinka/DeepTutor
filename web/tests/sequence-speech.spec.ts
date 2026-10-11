@@ -151,6 +151,14 @@ describe("localMathSpeak", () => {
   it("strips markdown marks and unicode math", () => {
     expect(localMathSpeak("**bold** `code` x ≤ y → z")).toBe("bold code x less than or equal to y to z");
   });
+
+  it("strips flattened rules and heading hashes mid-line", () => {
+    const speech = localMathSpeak("Approach the problem. --- ### Solution 1. Identify it.");
+    expect(speech).not.toContain("---");
+    expect(speech).not.toContain("#");
+    expect(speech).toContain("Approach the problem.");
+    expect(speech).toContain("Solution 1. Identify it.");
+  });
 });
 
 describe("wordOffsets", () => {

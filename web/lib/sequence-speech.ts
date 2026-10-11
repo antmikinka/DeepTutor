@@ -75,6 +75,7 @@ export function localMathSpeak(text: string): string {
     [/×/g, " times "],
     [/±/g, " plus or minus "],
     [/→/g, " to "],
+    [/(^|\s)-{3,}(?=\s|$)/g, " "],
     [/\*\*|__|\*|`|#|>/g, " "],
     [/\s{2,}/g, " "],
   ];
