@@ -23,6 +23,8 @@ from deeptutor.learning.sequence.service import (
     remove_step,
     scrub_explanation,
     scrub_hint,
+    walkthrough_intro,
+    walkthrough_reveal,
 )
 from deeptutor.learning.sequence.store import SequenceStore
 
@@ -780,6 +782,155 @@ async def test_quest_problems_reject_whole_answer_checks(tmp_path):
     assert after["solved"] is False
     assert after["attempts"] == 0
     assert after["placement_events"] == []
+
+
+@pytest.mark.asyncio
+async def test_guided_problems_advertise_their_mode_without_leaking(tmp_path):
+    store, view = await _generate(tmp_path, mode="guided")
+    assert view["mode"] == "guided"
+    saved = store.load(view["problem_id"])
+    assert saved["mode"] == "guided"
+    # The public view still hides the key: no order, no roles, no walkthrough.
+    assert not {"correct_ids", "role", "evidence", "walkthrough"} & _forbidden_keys(view)
+    assert view["solution_length"] == len(saved["correct_ids"])
+
+
+@pytest.mark.asyncio
+async def test_walkthroughs_refuse_problems_that_are_not_guided(tmp_path):
+    async def complete_text(**_kwargs):
+        return "Should never run."
+
+    for mode in ("practice", "quest"):
+        store, view = await _generate(tmp_path / mode, mode=mode)
+        with pytest.raises(SequenceError, match="Only a guided problem") as intro_exc:
+            await walkthrough_intro(store, view["problem_id"], complete_text=complete_text)
+        assert intro_exc.value.status == 409
+        with pytest.raises(SequenceError, match="Only a guided problem") as reveal_exc:
+            await walkthrough_reveal(store, view["problem_id"], 0, complete_text=complete_text)
+        assert reveal_exc.value.status == 409
+
+
+@pytest.mark.asyncio
+async def test_walkthrough_intro_explains_the_approach_once(tmp_path):
+    store, view = await _generate(tmp_path, mode="guided")
+    calls = {"n": 0}
+
+    async def complete_text(**kwargs):
+        calls["n"] += 1
+        assert "Do not list the steps" in kwargs["prompt"]
+        return "  This is a chain-rule derivative. Identify outer and inner first.  "
+
+    first = await walkthrough_intro(store, view["problem_id"], complete_text=complete_text)
+    assert first["intro"] == "This is a chain-rule derivative. Identify outer and inner first."
+    assert first["total"] == 3
+    # Cached on the record, so replaying the walkthrough never re-bills.
+    second = await walkthrough_intro(store, view["problem_id"], complete_text=complete_text)
+    assert second["intro"] == first["intro"]
+    assert calls["n"] == 1
+    assert store.load(view["problem_id"])["walkthrough"]["intro"] == first["intro"]
+
+
+@pytest.mark.asyncio
+async def test_walkthrough_intro_rejects_an_empty_model_reply(tmp_path):
+    store, view = await _generate(tmp_path, mode="guided")
+
+    async def complete_text(**_kwargs):
+        return "   "
+
+    with pytest.raises(SequenceError, match="could not introduce") as exc:
+        await walkthrough_intro(store, view["problem_id"], complete_text=complete_text)
+    assert exc.value.status == 502
+    assert "walkthrough" not in store.load(view["problem_id"])
+
+
+@pytest.mark.asyncio
+async def test_walkthrough_reveal_demonstrates_the_steps_in_order(tmp_path):
+    store, view = await _generate(tmp_path, mode="guided")
+    saved = store.load(view["problem_id"])
+    correct_ids = saved["correct_ids"]
+    by_id = {step["id"]: step for step in saved["steps"]}
+    calls = {"n": 0}
+
+    async def complete_text(**kwargs):
+        calls["n"] += 1
+        assert "Demonstrate step" in kwargs["prompt"]
+        return f"Demonstration {calls['n']}."
+
+    for index, step_id in enumerate(correct_ids):
+        entry = await walkthrough_reveal(
+            store, view["problem_id"], index, complete_text=complete_text
+        )
+        assert entry["step_id"] == step_id
+        assert entry["math"] == by_id[step_id]["math"]
+        assert entry["explanation"] == f"Demonstration {index + 1}."
+        assert entry["done"] is (index == len(correct_ids) - 1)
+        assert entry["total"] == len(correct_ids)
+
+    # Reveals are cached per index: a replay costs no model calls.
+    replay = await walkthrough_reveal(store, view["problem_id"], 0, complete_text=complete_text)
+    assert replay["explanation"] == "Demonstration 1."
+    assert calls["n"] == len(correct_ids)
+
+
+@pytest.mark.asyncio
+async def test_walkthrough_reveal_falls_back_to_the_stored_explanation(tmp_path):
+    store, view = await _generate(tmp_path, mode="guided")
+    saved = store.load(view["problem_id"])
+    first = saved["correct_ids"][0]
+    by_id = {step["id"]: step for step in saved["steps"]}
+
+    async def complete_text(**_kwargs):
+        return ""
+
+    entry = await walkthrough_reveal(store, view["problem_id"], 0, complete_text=complete_text)
+    assert entry["step_id"] == first
+    assert entry["explanation"] == " ".join(by_id[first]["explanation"].split())
+
+
+@pytest.mark.asyncio
+async def test_walkthrough_reveal_rejects_a_step_that_does_not_exist(tmp_path):
+    store, view = await _generate(tmp_path, mode="guided")
+    saved = store.load(view["problem_id"])
+
+    async def complete_text(**_kwargs):
+        return "Never runs."
+
+    for bad in (-1, len(saved["correct_ids"])):
+        with pytest.raises(SequenceError, match="does not exist") as exc:
+            await walkthrough_reveal(store, view["problem_id"], bad, complete_text=complete_text)
+        assert exc.value.status == 422
+
+
+@pytest.mark.asyncio
+async def test_guided_problems_reject_step_placement(tmp_path):
+    store, view = await _generate(tmp_path, mode="guided")
+    saved = store.load(view["problem_id"])
+    with pytest.raises(SequenceError, match="checked as a whole") as placed:
+        place_step(store, view["problem_id"], saved["correct_ids"][0], 0)
+    assert placed.value.status == 409
+    with pytest.raises(SequenceError, match="checked as a whole") as removed:
+        remove_step(store, view["problem_id"], saved["correct_ids"][0])
+    assert removed.value.status == 409
+
+
+@pytest.mark.asyncio
+async def test_guided_problems_grade_the_rebuilt_solution_like_practice(tmp_path):
+    store, view = await _generate(tmp_path, mode="guided")
+    saved = store.load(view["problem_id"])
+    correct_ids = saved["correct_ids"]
+
+    wrong = check_answer(store, view["problem_id"], [correct_ids[1], correct_ids[0]])
+    assert wrong["solved"] is False
+    assert wrong["marks"] == ["incorrect", "incorrect"]
+
+    solved = check_answer(store, view["problem_id"], list(correct_ids))
+    assert solved["solved"] is True
+    assert solved["problem"]["solved"] is True
+    # Rebuilding after the demonstration still earns module progress.
+    assert solved["problem"]["progress"]["solved"] == 1
+    after = store.load(view["problem_id"])
+    assert after["solved"] is True
+    assert after["attempts"] == 2
 
 
 @pytest.mark.asyncio

@@ -118,7 +118,7 @@ def public_problem(record: dict[str, Any]) -> dict[str, Any]:
         "solution_length": len(record.get("correct_ids") or []),
         "placed_ids": list(record.get("placed_ids") or []),
         "solved": solved,
-        "mode": "quest" if record.get("mode") == "quest" else "practice",
+        "mode": record.get("mode") if record.get("mode") in ("quest", "guided") else "practice",
         "explanation": record["explanation"] if solved else None,
         "progress": {
             "solved": int(record.get("progress_solved") or 0),
