@@ -14,9 +14,10 @@ def _client():
 
 
 def test_create_returns_the_service_payload(monkeypatch):
-    async def fake_generate(knowledge_base, topic, _store):
+    async def fake_generate(knowledge_base, topic, _store, mode="practice"):
         assert knowledge_base == "calculus"
         assert topic == "chain rule"
+        assert mode == "practice"
         return {
             "problem_id": "problem-000000000001",
             "question": "Differentiate.",
@@ -24,6 +25,7 @@ def test_create_returns_the_service_payload(monkeypatch):
             "steps": [],
             "placed_ids": [],
             "solved": False,
+            "mode": mode,
             "explanation": None,
             "progress": {"solved": 0, "goal": 5},
             "sources": [],
@@ -39,8 +41,116 @@ def test_create_returns_the_service_payload(monkeypatch):
     assert "correct_ids" not in response.json()
 
 
+def test_create_passes_the_chosen_mode_to_the_service(monkeypatch):
+    async def fake_generate(_knowledge_base, _topic, _store, mode="practice"):
+        assert mode == "quest"
+        return {
+            "problem_id": "problem-000000000001",
+            "question": "Differentiate.",
+            "formulas": [],
+            "steps": [],
+            "placed_ids": [],
+            "solved": False,
+            "mode": mode,
+            "explanation": None,
+            "progress": {"solved": 0, "goal": 5},
+            "sources": [],
+        }
+
+    monkeypatch.setattr(sequence, "generate_problem", fake_generate)
+    response = _client().post(
+        "/api/solution-sequence/problems",
+        json={"knowledge_base": "calculus", "topic": "chain rule", "mode": "quest"},
+    )
+    assert response.status_code == 200
+    assert response.json()["mode"] == "quest"
+
+    rejected = _client().post(
+        "/api/solution-sequence/problems",
+        json={"knowledge_base": "calculus", "topic": "chain rule", "mode": "marathon"},
+    )
+    assert rejected.status_code == 422
+
+
+def test_create_accepts_guided_mode(monkeypatch):
+    async def fake_generate(_knowledge_base, _topic, _store, mode="practice"):
+        assert mode == "guided"
+        return {
+            "problem_id": "problem-000000000001",
+            "question": "Differentiate.",
+            "formulas": [],
+            "steps": [],
+            "placed_ids": [],
+            "solved": False,
+            "mode": mode,
+            "explanation": None,
+            "progress": {"solved": 0, "goal": 5},
+            "sources": [],
+        }
+
+    monkeypatch.setattr(sequence, "generate_problem", fake_generate)
+    response = _client().post(
+        "/api/solution-sequence/problems",
+        json={"knowledge_base": "calculus", "topic": "chain rule", "mode": "guided"},
+    )
+    assert response.status_code == 200
+    assert response.json()["mode"] == "guided"
+
+
+def test_walkthrough_intro_delegates_and_maps_the_mode_lock(monkeypatch):
+    async def fake_intro(_store, problem_id):
+        assert problem_id == "problem-000000000001"
+        return {"intro": "Identify the outer and inner functions first.", "total": 3}
+
+    monkeypatch.setattr(sequence, "walkthrough_intro", fake_intro)
+    response = _client().post(
+        "/api/solution-sequence/problems/problem-000000000001/walkthrough/intro"
+    )
+    assert response.status_code == 200
+    assert response.json()["intro"].startswith("Identify")
+
+    async def locked_intro(_store, _problem_id):
+        raise SequenceError(409, "Only a guided problem has a walkthrough.")
+
+    monkeypatch.setattr(sequence, "walkthrough_intro", locked_intro)
+    rejected = _client().post(
+        "/api/solution-sequence/problems/problem-000000000001/walkthrough/intro"
+    )
+    assert rejected.status_code == 409
+    assert "Only a guided problem" in rejected.json()["detail"]
+
+
+def test_walkthrough_reveal_passes_the_index_and_validates_the_body(monkeypatch):
+    async def fake_reveal(_store, problem_id, index):
+        assert problem_id == "problem-000000000001"
+        assert index == 1
+        return {
+            "index": 1,
+            "step_id": "s_two",
+            "math": "$\\cos(x^2)$",
+            "explanation": "Differentiate the outer function.",
+            "done": False,
+            "total": 3,
+        }
+
+    monkeypatch.setattr(sequence, "walkthrough_reveal", fake_reveal)
+    response = _client().post(
+        "/api/solution-sequence/problems/problem-000000000001/walkthrough/reveal",
+        json={"index": 1},
+    )
+    assert response.status_code == 200
+    assert response.json()["step_id"] == "s_two"
+
+    for bad in (-1, 12):
+        rejected = _client().post(
+            "/api/solution-sequence/problems/problem-000000000001/walkthrough/reveal",
+            json={"index": bad},
+        )
+        assert rejected.status_code == 422
+
+
 def test_create_maps_a_grounding_failure(monkeypatch):
-    async def fake_generate(_knowledge_base, _topic, _store):
+    async def fake_generate(_knowledge_base, _topic, _store, mode="practice"):
         raise SequenceError(
             422, "That knowledge base did not return enough material for this topic."
         )

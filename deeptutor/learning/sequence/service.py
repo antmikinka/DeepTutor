@@ -14,10 +14,13 @@ from deeptutor.learning.sequence.outline import (
     modules_from_files,
 )
 from deeptutor.learning.sequence.prompts import (
+    approach_prompt,
     explain_prompt,
+    guide_prompt,
     hint_prompt,
     outline_system_prompt,
     outline_user_prompt,
+    reveal_prompt,
     system_prompt,
     tutor_prompt,
     user_prompt,
@@ -70,6 +73,7 @@ def _record_from_problem(
     corpus: str,
     sources: list[dict[str, str]],
     language: str,
+    mode: str,
     id_factory: Callable[[], str] | None,
     shuffle: Callable[[list], None] | None,
 ) -> dict[str, Any]:
@@ -115,6 +119,9 @@ def _record_from_problem(
         "correct_ids": correct_ids,
         "placed_ids": [],
         "solved": False,
+        "mode": mode,
+        "attempts": 0,
+        "placement_events": [],
     }
 
 
@@ -189,6 +196,7 @@ async def generate_problem(
     topic: str,
     store: SequenceStore,
     *,
+    mode: str = "practice",
     language: str | None = None,
     search=None,
     complete_json=None,
@@ -198,6 +206,7 @@ async def generate_problem(
     """Retrieve passages, write one problem, and return the public view."""
     kb_name = kb_name.strip()
     topic = " ".join(topic.split())
+    mode = mode if mode in _MODES else "practice"
     if not kb_name:
         raise SequenceError(422, "Choose a knowledge base.")
     if not topic or len(topic) > 200:
@@ -233,6 +242,7 @@ async def generate_problem(
         corpus=corpus,
         sources=source_labels(result),
         language=language,
+        mode=mode,
         id_factory=id_factory,
         shuffle=shuffle,
     )
@@ -389,10 +399,40 @@ def _step(record: dict[str, Any], step_id: str) -> dict[str, str]:
     raise SequenceError(404, "That step is not part of this problem.")
 
 
+_MODES = ("quest", "guided")
+
+
+def _mode(record: dict[str, Any]) -> str:
+    """Sessions written before modes existed are practice sessions."""
+    raw = record.get("mode")
+    return raw if raw in _MODES else "practice"
+
+
+_EVENT_CAP = 500
+
+
+def _count_attempt(record: dict[str, Any]) -> None:
+    record["attempts"] = int(record.get("attempts") or 0) + 1
+
+
+def _log_placement(record: dict[str, Any], step_id: str, index: int, accepted: bool) -> None:
+    """Append to the ordered placement log. Past the cap, stop; never trim."""
+    events = record.setdefault("placement_events", [])
+    if not isinstance(events, list) or len(events) >= _EVENT_CAP:
+        return
+    events.append(
+        {"step_id": step_id, "index": index, "accepted": accepted, "seq": len(events) + 1}
+    )
+
+
 def place_step(store: SequenceStore, problem_id: str, step_id: str, index: int) -> dict[str, Any]:
     def apply(record: dict[str, Any]) -> dict[str, Any]:
         if record.get("solved"):
             raise SequenceError(409, "This solution is already complete.")
+        if _mode(record) != "quest":
+            raise SequenceError(
+                409, "This problem is checked as a whole. Use quest mode to place single steps."
+            )
         step = _step(record, step_id)
         placed = list(record.get("placed_ids") or [])
         if step_id in placed:
@@ -415,7 +455,9 @@ def place_step(store: SequenceStore, problem_id: str, step_id: str, index: int) 
             else:
                 record["progress_solved"] = store.progress(record["kb_name"], record["topic"])
         else:
+            _count_attempt(record)
             record["progress_solved"] = store.progress(record["kb_name"], record["topic"])
+        _log_placement(record, step["id"], index, accepted)
         return {"accepted": accepted, "problem": public_problem(record)}
 
     return _mutate(store, problem_id, apply)
@@ -425,9 +467,14 @@ def remove_step(store: SequenceStore, problem_id: str, step_id: str) -> dict[str
     def apply(record: dict[str, Any]) -> dict[str, Any]:
         if record.get("solved"):
             raise SequenceError(409, "This solution is already complete.")
+        if _mode(record) != "quest":
+            raise SequenceError(
+                409, "This problem is checked as a whole. Use quest mode to place single steps."
+            )
         _step(record, step_id)
         correct_ids = list(record.get("correct_ids") or [])
-        remaining = [item for item in record.get("placed_ids") or [] if item != step_id]
+        before = list(record.get("placed_ids") or [])
+        remaining = [item for item in before if item != step_id]
         kept: list[str] = []
         for item in remaining:
             if len(kept) < len(correct_ids) and correct_ids[len(kept)] == item:
@@ -435,6 +482,10 @@ def remove_step(store: SequenceStore, problem_id: str, step_id: str) -> dict[str
             else:
                 break
         record["placed_ids"] = kept
+        if kept != before:
+            # A removal breaks the prefix, so it is logged like a rejection.
+            index = before.index(step_id) if step_id in before else len(kept)
+            _log_placement(record, step_id, index, False)
         record["progress_solved"] = store.progress(record["kb_name"], record["topic"])
         return public_problem(record)
 
@@ -454,6 +505,12 @@ def check_answer(store: SequenceStore, problem_id: str, step_ids: list[str]) -> 
             raise SequenceError(422, "Each step can appear only once.")
         if record.get("solved"):
             raise SequenceError(409, "This solution is already complete.")
+        if _mode(record) not in ("practice", "guided"):
+            raise SequenceError(
+                409, "This problem is solved step by step. Remove a step or place the next one."
+            )
+        # Every graded check costs one attempt, including the solving one.
+        _count_attempt(record)
         correct_ids = list(record.get("correct_ids") or [])
         marks = [
             "correct" if index < len(correct_ids) and correct_ids[index] == step_id else "incorrect"
@@ -610,3 +667,108 @@ async def explain_step(
         _math_for(record, correct_id) for correct_id in correct_ids if correct_id not in placed
     ]
     return {"explanation": scrub_explanation(text, step["explanation"], unplaced_math)}
+
+
+def _require_guided(record: dict[str, Any]) -> list[str]:
+    """Walkthroughs reveal the answer key, so only guided problems may ask.
+
+    A practice or quest session that could reach these endpoints would leak
+    the secret order, which is the one thing those modes promise to keep.
+    """
+    if _mode(record) != "guided":
+        raise SequenceError(409, "Only a guided problem has a walkthrough.")
+    return [str(step_id) for step_id in record.get("correct_ids") or []]
+
+
+async def walkthrough_intro(
+    store: SequenceStore,
+    problem_id: str,
+    *,
+    complete_text=None,
+) -> dict[str, Any]:
+    """Explain how to approach the problem, before any step is shown."""
+    record = _require(store, problem_id)
+    correct_ids = _require_guided(record)
+    cached = (record.get("walkthrough") or {}).get("intro")
+    if isinstance(cached, str) and cached.strip():
+        return {"intro": cached.strip(), "total": len(correct_ids)}
+    prompt = approach_prompt(record["question"], record.get("context") or "")
+    if complete_text is None:
+        from deeptutor.services.llm import complete as complete_text
+    text = await complete_text(
+        prompt=prompt,
+        system_prompt=guide_prompt(record.get("language")),
+        temperature=0.3,
+        max_tokens=300,
+        max_retries=0,
+    )
+    intro = " ".join(str(text or "").split())[:700]
+    if not intro:
+        raise SequenceError(502, "The tutor could not introduce this problem yet. Try again.")
+
+    def cache(saved: dict[str, Any]) -> dict[str, str]:
+        walk = saved.setdefault("walkthrough", {})
+        walk["intro"] = intro
+        return {"intro": intro}
+
+    _mutate(store, problem_id, cache)
+    return {"intro": intro, "total": len(correct_ids)}
+
+
+async def walkthrough_reveal(
+    store: SequenceStore,
+    problem_id: str,
+    index: int,
+    *,
+    complete_text=None,
+) -> dict[str, Any]:
+    """Demonstrate one correct step in place, with the reasoning behind it.
+
+    Reveals are generated lazily and cached on the record, so replaying a
+    walkthrough never bills the model twice, and a learner who stops halfway
+    only ever received the prefix they watched.
+    """
+    record = _require(store, problem_id)
+    correct_ids = _require_guided(record)
+    if not isinstance(index, int) or isinstance(index, bool):
+        raise SequenceError(422, "Say which step to demonstrate.")
+    if index < 0 or index >= len(correct_ids):
+        raise SequenceError(422, "That demonstration step does not exist.")
+    walk = record.get("walkthrough") or {}
+    cached = (walk.get("revealed") or {}).get(str(index))
+    if isinstance(cached, dict) and cached.get("explanation"):
+        return cached
+    step = _step(record, correct_ids[index])
+    prompt = reveal_prompt(
+        record["question"],
+        step["explanation"],
+        step["math"],
+        index + 1,
+        len(correct_ids),
+        record.get("context") or "",
+    )
+    if complete_text is None:
+        from deeptutor.services.llm import complete as complete_text
+    text = await complete_text(
+        prompt=prompt,
+        system_prompt=guide_prompt(record.get("language")),
+        temperature=0.3,
+        max_tokens=500,
+        max_retries=0,
+    )
+    body = " ".join(str(text or "").split())[:800] or " ".join(step["explanation"].split())
+    entry = {
+        "index": index,
+        "step_id": step["id"],
+        "math": step["math"],
+        "explanation": body,
+        "done": index == len(correct_ids) - 1,
+        "total": len(correct_ids),
+    }
+
+    def cache(saved: dict[str, Any]) -> dict[str, Any]:
+        revealed = saved.setdefault("walkthrough", {}).setdefault("revealed", {})
+        revealed.setdefault(str(index), entry)
+        return entry
+
+    return _mutate(store, problem_id, cache)
