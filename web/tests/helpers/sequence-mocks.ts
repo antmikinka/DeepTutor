@@ -38,6 +38,12 @@ export const PRACTICE_PROBLEM: SequenceProblem = {
   mode: "practice",
 };
 
+export const GUIDED_PROBLEM: SequenceProblem = {
+  ...QUEST_PROBLEM,
+  problem_id: "g1",
+  mode: "guided",
+};
+
 /** The server-side truth the client must never see: which order solves it. */
 export const CORRECT_IDS = ["s_outer", "s_inner"];
 
