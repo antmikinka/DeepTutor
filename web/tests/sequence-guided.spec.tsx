@@ -6,13 +6,15 @@
  */
 
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import type { ComponentProps, ReactNode } from "react";
 import { SequencePage } from "@/components/learning/sequence/SequencePage";
 import { initI18n } from "@/i18n/init";
+import * as api from "@/lib/api";
 import * as knowledge from "@/features/knowledge/api/client";
 import * as sequenceApi from "@/lib/sequence-api";
 import * as sound from "@/lib/sequence-sound";
+import { stopNarration } from "@/lib/sequence-speech";
 import {
   type SequenceCheckResult,
   type SequenceMode,
@@ -36,6 +38,11 @@ vi.mock("next/dynamic", () => ({
 }));
 vi.mock("@/features/knowledge/api/client", () => ({
   listKnowledgeBases: vi.fn(),
+}));
+vi.mock("@/lib/api", async importOriginal => ({
+  ...(await importOriginal<typeof api>()),
+  apiFetch: vi.fn(),
+  apiUrl: vi.fn((path: string) => path),
 }));
 vi.mock("@/lib/sequence-sound", () => ({
   playBreak: vi.fn(),
@@ -162,9 +169,60 @@ function walkthroughPanel(): HTMLElement {
   return panel;
 }
 
+interface UtteranceMock {
+  text: string;
+  rate: number;
+  lang: string;
+  onboundary: ((event: { name?: string; charIndex: number }) => void) | null;
+  onend: (() => void) | null;
+  onerror: (() => void) | null;
+}
+
+let utterances: UtteranceMock[] = [];
+let cancelMock: Mock<() => void> = vi.fn();
+
+/** jsdom has no speech engine; the narration code paths stay dormant without this. */
+function stubSpeechEngine(): void {
+  utterances = [];
+  cancelMock = vi.fn<() => void>();
+  const speak = vi.fn<(utterance: UtteranceMock) => void>(utterance => {
+    utterances.push(utterance);
+  });
+  class UtteranceStub implements UtteranceMock {
+    text: string;
+    rate = 1;
+    lang = "";
+    onboundary: UtteranceMock["onboundary"] = null;
+    onend: UtteranceMock["onend"] = null;
+    onerror: UtteranceMock["onerror"] = null;
+    constructor(text: string) {
+      this.text = text;
+    }
+  }
+  vi.stubGlobal("SpeechSynthesisUtterance", UtteranceStub);
+  vi.stubGlobal("speechSynthesis", { speak, cancel: cancelMock });
+}
+
+function karaoke(): HTMLElement | null {
+  return document.querySelector("[data-karaoke]");
+}
+
+function activeWord(): string | null | undefined {
+  return karaoke()?.querySelector('[data-active="true"]')?.textContent;
+}
+
 beforeEach(() => {
   vi.useFakeTimers();
   localStorage.clear();
+  stubSpeechEngine();
+  // The speak-text endpoint echoes its input: prepared === source, so tests
+  // can assert on the exact string that reaches the voice and the transcript.
+  vi.mocked(api.apiFetch).mockImplementation(
+    async (_url: Parameters<typeof api.apiFetch>[0], init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { text?: string };
+      return { ok: true, json: async () => ({ speech: body.text ?? "" }) } as unknown as Response;
+    },
+  );
   vi.mocked(knowledge.listKnowledgeBases).mockResolvedValue([{ name: "calculus" }]);
   vi.mocked(sequenceApi.getSequenceOutline).mockResolvedValue(OUTLINE);
   vi.mocked(sound.soundEnabled).mockReturnValue(false);
@@ -182,7 +240,9 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  stopNarration();
   vi.useRealTimers();
+  vi.unstubAllGlobals();
 });
 
 describe("guided mode picker", () => {
@@ -349,5 +409,123 @@ describe("guided rebuild", () => {
     expect(screen.getByRole("heading", { name: "Walkthrough" })).toBeInTheDocument();
     expect(sequenceApi.requestWalkthroughIntro).toHaveBeenCalledTimes(2);
     expect(screen.queryByRole("heading", { name: "Your solution" })).toBeNull();
+  });
+});
+
+describe("guided narration", () => {
+  it("reads the new problem aloud with a follow-along transcript", async () => {
+    await renderPage();
+    fireEvent.click(screen.getByRole("button", { name: /chain rule/ }));
+    await flush();
+
+    expect(api.apiFetch).toHaveBeenCalledWith(
+      "/api/voice/speak-text",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(utterances).toHaveLength(1);
+    expect(utterances[0].text).toBe(GUIDED_PROBLEM.question);
+    expect(karaoke()).not.toBeNull();
+    // Nothing is lit before the voice reaches the first word.
+    expect(activeWord()).toBeUndefined();
+
+    // charIndex 8 is the start of "the" in the question string.
+    act(() => {
+      utterances[0].onboundary?.({ name: "word", charIndex: 8 });
+    });
+    expect(activeWord()).toBe("the");
+  });
+
+  it("queues the walkthrough intro behind the question reading", async () => {
+    await renderPage();
+    await openGuided();
+
+    // One voice at a time: the intro waits instead of talking over the problem.
+    expect(utterances).toHaveLength(1);
+    expect(utterances[0].text).toBe(GUIDED_PROBLEM.question);
+
+    act(() => {
+      utterances[0].onend?.();
+    });
+    await flush();
+    expect(utterances).toHaveLength(2);
+    expect(utterances[1].text).toBe(INTRO);
+  });
+
+  it("speaks each reveal immediately, interrupting the intro", async () => {
+    await renderPage();
+    await openGuided();
+    act(() => {
+      utterances[0].onend?.();
+    });
+    await flush();
+    expect(utterances[1].text).toBe(INTRO);
+
+    fireEvent.click(screen.getByRole("button", { name: "Show next step" }));
+    await flush();
+    // A tap means "show me this now": the reveal wins over the queued intro.
+    expect(utterances).toHaveLength(3);
+    expect(utterances[2].text).toBe(`${REVEALS[0].math}. ${REVEALS[0].explanation}`);
+    expect(cancelMock).toHaveBeenCalledTimes(1);
+    expect(karaoke()?.textContent).toContain("Differentiate the outer function");
+  });
+
+  it("silences the voice when the learner takes over", async () => {
+    await renderPage();
+    await openGuided();
+    act(() => {
+      utterances[0].onend?.();
+    });
+    await flush();
+    expect(utterances[1].text).toBe(INTRO);
+
+    fireEvent.click(screen.getByRole("button", { name: "I've got this" }));
+    await flush();
+    expect(cancelMock).toHaveBeenCalledTimes(1);
+    expect(karaoke()).toBeNull();
+  });
+
+  it("the Narration toggle cuts live speech, persists, and keeps new problems quiet", async () => {
+    await renderPage();
+    await openGuided();
+    expect(utterances).toHaveLength(1);
+
+    const toggle = screen.getByRole("button", { name: "Narration" });
+    expect(toggle).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(toggle);
+    await flush();
+    expect(toggle).toHaveAttribute("aria-pressed", "false");
+    expect(localStorage.getItem("deeptutor.sequence.narration")).toBe("0");
+    expect(cancelMock).toHaveBeenCalledTimes(1);
+    expect(karaoke()).toBeNull();
+
+    // The next problem is created in silence.
+    fireEvent.click(screen.getByRole("button", { name: "Go back" }));
+    await flush();
+    fireEvent.click(screen.getByRole("button", { name: /chain rule/ }));
+    await flush();
+    expect(utterances).toHaveLength(1);
+  });
+
+  it("per-card speaker buttons work even while auto narration is off", async () => {
+    await renderPage();
+    await openGuided();
+    fireEvent.click(screen.getByRole("button", { name: "Narration" }));
+    await flush();
+    expect(cancelMock).toHaveBeenCalledTimes(1);
+    expect(karaoke()).toBeNull();
+
+    // Manual reads ignore the auto toggle; the question card is the first speaker.
+    const speakers = screen.getAllByRole("button", { name: "Read aloud" });
+    fireEvent.click(speakers[0]);
+    await flush();
+    expect(utterances).toHaveLength(2);
+    expect(utterances[1].text).toBe(GUIDED_PROBLEM.question);
+    expect(karaoke()).not.toBeNull();
+
+    // While talking, the same button becomes a stop control.
+    fireEvent.click(screen.getByRole("button", { name: "Stop reading" }));
+    await flush();
+    expect(cancelMock).toHaveBeenCalledTimes(2);
+    expect(karaoke()).toBeNull();
   });
 });

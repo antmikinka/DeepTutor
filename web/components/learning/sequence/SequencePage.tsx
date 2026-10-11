@@ -2,11 +2,13 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useReducedMotion } from "framer-motion";
+import { Volume2, VolumeX } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import InlineMarkdown from "@/components/common/InlineMarkdown";
 import MarkdownRenderer from "@/components/common/MarkdownRenderer";
 import { LearningShell } from "@/components/learning/LearningShell";
 import { ComboBadge } from "@/components/learning/sequence/ComboBadge";
+import { KaraokeTranscript } from "@/components/learning/sequence/KaraokeTranscript";
 import { ProblemTimer } from "@/components/learning/sequence/ProblemTimer";
 import { ProgressRing } from "@/components/learning/sequence/ProgressRing";
 import { SequenceBanner } from "@/components/learning/sequence/SequenceBanner";
@@ -45,6 +47,14 @@ import {
   soundEnabled,
   unlockAudio,
 } from "@/lib/sequence-sound";
+import {
+  narrationEnabled,
+  prepareSpeech,
+  setNarrationEnabled,
+  speechSupported,
+  startNarration,
+  stopNarration,
+} from "@/lib/sequence-speech";
 import { Dialog } from "@/shared/ui/Dialog";
 
 type StepStyle = "word" | "symbol";
@@ -91,8 +101,15 @@ function bankClass(verdict: StepMark | undefined): string {
   return `${base} border-[var(--border)] bg-[var(--background)] hover:bg-[var(--muted)]`;
 }
 
+/** Which card the voice is on: the question, the intro, or one reveal. */
+interface SpeechState {
+  target: string;
+  text: string;
+  word: number;
+}
+
 export function SequencePage() {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const outlineRequest = useRef(0);
   const writingRef = useRef(false);
   const view = useRef(0);
@@ -131,6 +148,15 @@ export function SequencePage() {
   const [aura, setAura] = useState<"accept" | "reject" | null>(null);
   const [celebration, setCelebration] = useState<CelebrationData | null>(null);
   const [soundOn, setSoundOn] = useState(false);
+  // Narration: server-prepared "math speak" text voiced by the browser, with
+  // the spoken word lit up in a follow-along transcript. Default ON; the HUD
+  // toggle persists the choice. `speech` is null while nothing is talking.
+  const [narrationOn, setNarrationOn] = useState(true);
+  const [speech, setSpeech] = useState<SpeechState | null>(null);
+  const narrationRef = useRef(true);
+  const speechTargetRef = useRef<string | null>(null);
+  const speechSeq = useRef(0);
+  const speechQueue = useRef<Array<{ target: string; source: string }>>([]);
   const comboRef = useRef<ComboState>(initialCombo);
   const busyRef = useRef(false);
   const auraTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -145,15 +171,19 @@ export function SequencePage() {
   const reduceMotion = useReducedMotion();
 
   useEffect(() => {
-    // Read the persisted sound and auto-check preferences after mount so
-    // server and client render the same initial toggle states.
+    // Read the persisted sound, auto-check and narration preferences after
+    // mount so server and client render the same initial toggle states.
     setSoundOn(soundEnabled());
     const savedAutocheck = autocheckEnabled();
     autocheckRef.current = savedAutocheck;
     setAutocheck(savedAutocheck);
+    const savedNarration = narrationEnabled();
+    narrationRef.current = savedNarration;
+    setNarrationOn(savedNarration);
     return () => {
       if (auraTimer.current) clearTimeout(auraTimer.current);
       if (autoTimer.current) clearTimeout(autoTimer.current);
+      stopNarration();
     };
   }, []);
 
@@ -209,6 +239,7 @@ export function SequencePage() {
     setGuideTotal(0);
     setGuideReveals([]);
     setGuideBusy(false);
+    silenceNarration();
 
     void (async () => {
       const current = () => !cancelled && outlineRequest.current === id;
@@ -285,6 +316,81 @@ export function SequencePage() {
     setAutocheck(next);
     if (next) scheduleAutocheck(assembled);
     else cancelAutocheck();
+  }
+
+  function toggleNarration() {
+    const next = !narrationOn;
+    setNarrationEnabled(next);
+    narrationRef.current = next;
+    setNarrationOn(next);
+    if (!next) silenceNarration();
+  }
+
+  /**
+   * Speak one card with karaoke highlighting. The prepared text and the
+   * spoken text are the same string, so boundary events map to the exact
+   * highlighted word. `queue` parks the request behind the current voice
+   * instead of cutting it off — used when the intro lands while the question
+   * is still being read.
+   */
+  async function narrate(target: string, source: string, queue = false) {
+    if (!speechSupported() || !source.trim()) return;
+    if (queue && speechTargetRef.current) {
+      speechQueue.current.push({ target, source });
+      return;
+    }
+    const id = ++speechSeq.current;
+    speechQueue.current = [];
+    stopNarration();
+    speechTargetRef.current = target;
+    const prepared = await prepareSpeech(source);
+    if (speechSeq.current !== id || speechTargetRef.current !== target) return;
+    if (!prepared.trim()) {
+      speechTargetRef.current = null;
+      setSpeech(null);
+      return;
+    }
+    setSpeech({ target, text: prepared, word: -1 });
+    const started = startNarration(prepared, {
+      lang: i18n.language || undefined,
+      onWord: index => {
+        if (speechSeq.current !== id) return;
+        setSpeech(previous =>
+          previous && previous.target === target ? { ...previous, word: index } : previous,
+        );
+      },
+      onEnd: () => {
+        if (speechSeq.current !== id) return;
+        const next = speechQueue.current.shift() ?? null;
+        speechTargetRef.current = next ? next.target : null;
+        setSpeech(null);
+        if (next) void narrate(next.target, next.source);
+      },
+    });
+    if (!started) {
+      speechTargetRef.current = null;
+      setSpeech(null);
+    }
+  }
+
+  /** Stop the voice, drop the transcript, and abandon any queued sentence. */
+  function silenceNarration() {
+    speechSeq.current += 1;
+    speechQueue.current = [];
+    speechTargetRef.current = null;
+    stopNarration();
+    setSpeech(null);
+  }
+
+  /** Per-card speaker button: manual reads ignore the auto-narration toggle. */
+  function toggleSpeak(target: string, source: string) {
+    if (speechTargetRef.current === target) silenceNarration();
+    else void narrate(target, source);
+  }
+
+  /** The single speakable sentence for a demonstrated step. */
+  function revealSpeechSource(reveal: WalkthroughReveal): string {
+    return `${reveal.math}. ${reveal.explanation}`;
   }
 
   /** Kill any parked auto-check so a late response cannot repaint the board. */
@@ -370,6 +476,9 @@ export function SequencePage() {
       setGuideIntro("");
       setGuideTotal(0);
       setGuideReveals([]);
+      // A fresh problem always starts silent; narration then reads it aloud.
+      silenceNarration();
+      if (narrationRef.current) void narrate("question", next.question);
       if (next.mode === "guided") {
         setGuidePhase("loading");
         void beginWalkthrough(next, viewId);
@@ -573,6 +682,7 @@ export function SequencePage() {
     setWriting(false);
     releaseBusy();
     cancelAutocheck();
+    silenceNarration();
     setProblem(null);
     setAssembled([]);
     setMarks(null);
@@ -659,6 +769,8 @@ export function SequencePage() {
       if (view.current !== viewId) return;
       setGuideIntro(intro.intro);
       setGuideTotal(intro.total);
+      // Queue behind the question reading; never cut the problem statement off.
+      if (narrationRef.current) void narrate("intro", intro.intro, true);
     } catch (error) {
       if (view.current !== viewId) return;
       setGuideTotal(target.solution_length || target.steps.length);
@@ -688,6 +800,10 @@ export function SequencePage() {
       // A duplicate arrival for an already-shown index is dropped, never
       // appended twice, even if two clicks raced the busy flag.
       setGuideReveals(previous => (previous.length === index ? [...previous, reveal] : previous));
+      // The tap means "show me THIS step now", so the voice cuts in at once.
+      if (narrationRef.current) {
+        void narrate(`reveal:${reveal.step_id}`, revealSpeechSource(reveal));
+      }
     } catch (error) {
       if (view.current !== viewId) return;
       setMessage(
@@ -702,6 +818,7 @@ export function SequencePage() {
   function yourTurn() {
     // Invalidate any in-flight walkthrough request: the demo is over.
     view.current += 1;
+    silenceNarration();
     setGuideBusy(false);
     setGuidePhase("assembly");
     setGuideReveals([]);
@@ -891,8 +1008,26 @@ export function SequencePage() {
             {t("Go back")}
           </button>
           <section className="rounded-xl border border-[var(--border)] bg-[var(--background)] p-5">
-            {activeTopic && <p className="mb-2 text-sm font-semibold text-[var(--primary)]">{activeTopic}</p>}
+            <div className="mb-2 flex items-start gap-2">
+              {activeTopic && <p className="text-sm font-semibold text-[var(--primary)]">{activeTopic}</p>}
+              <button
+                type="button"
+                aria-label={speech?.target === "question" ? t("Stop reading") : t("Read aloud")}
+                title={speech?.target === "question" ? t("Stop reading") : t("Read aloud")}
+                className="ml-auto shrink-0 rounded-lg border border-[var(--border)] bg-[var(--background)] p-1.5 text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
+                onClick={() => toggleSpeak("question", problem.question)}
+              >
+                {speech?.target === "question" ? (
+                  <VolumeX size={16} aria-hidden="true" />
+                ) : (
+                  <Volume2 size={16} aria-hidden="true" />
+                )}
+              </button>
+            </div>
             <MarkdownRenderer content={problem.question} enableMath />
+            {speech?.target === "question" && (
+              <KaraokeTranscript text={speech.text} activeWord={speech.word} label={t("Follow along")} />
+            )}
             {problem.formulas.length > 0 && (
               <div className="mt-4 border-t border-[var(--border)] pt-3">
                 <h2 className="mb-2 text-sm font-semibold">{t("Key formulas")}</h2>
@@ -936,6 +1071,19 @@ export function SequencePage() {
               >
                 {t("Sound")}
               </button>
+              <button
+                type="button"
+                aria-pressed={narrationOn}
+                title={t("Read problems and walkthroughs aloud, speaking math in words")}
+                className={`rounded-lg border px-3 py-1 text-sm ${
+                  narrationOn
+                    ? "border-[var(--primary)] bg-[var(--primary)] text-[var(--primary-foreground)]"
+                    : "border-[var(--border)] bg-[var(--background)] text-[var(--foreground)]"
+                }`}
+                onClick={toggleNarration}
+              >
+                {t("Narration")}
+              </button>
             </div>
             <div className="flex gap-1 rounded-lg border border-[var(--border)] p-1">
               <button type="button" className={styleButton(style === "word")} onClick={() => setStyle("word")}>
@@ -959,10 +1107,32 @@ export function SequencePage() {
                 <>
                   {guideIntro && (
                     <div className="mb-4 rounded-lg border border-[var(--border)] bg-[var(--muted)] p-3">
-                      <h3 className="mb-1 text-sm font-semibold">
-                        {t("How to approach this problem")}
-                      </h3>
+                      <div className="mb-1 flex items-start gap-2">
+                        <h3 className="text-sm font-semibold">
+                          {t("How to approach this problem")}
+                        </h3>
+                        <button
+                          type="button"
+                          aria-label={speech?.target === "intro" ? t("Stop reading") : t("Read aloud")}
+                          title={speech?.target === "intro" ? t("Stop reading") : t("Read aloud")}
+                          className="ml-auto shrink-0 rounded-lg border border-[var(--border)] bg-[var(--background)] p-1.5 text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
+                          onClick={() => toggleSpeak("intro", guideIntro)}
+                        >
+                          {speech?.target === "intro" ? (
+                            <VolumeX size={16} aria-hidden="true" />
+                          ) : (
+                            <Volume2 size={16} aria-hidden="true" />
+                          )}
+                        </button>
+                      </div>
                       <MarkdownRenderer content={guideIntro} enableMath />
+                      {speech?.target === "intro" && (
+                        <KaraokeTranscript
+                          text={speech.text}
+                          activeWord={speech.word}
+                          label={t("Follow along")}
+                        />
+                      )}
                     </div>
                   )}
                   <ol className="space-y-2">
@@ -971,16 +1141,48 @@ export function SequencePage() {
                         key={reveal.step_id}
                         className="rounded-lg border border-[var(--primary)] bg-[var(--background)] p-3"
                       >
-                        <p className="mb-1 text-xs font-semibold text-[var(--primary)]">
-                          {t("Step {{shown}} of {{total}} demonstrated", {
-                            shown: reveal.index + 1,
-                            total: reveal.total,
-                          })}
-                        </p>
+                        <div className="mb-1 flex items-start gap-2">
+                          <p className="text-xs font-semibold text-[var(--primary)]">
+                            {t("Step {{shown}} of {{total}} demonstrated", {
+                              shown: reveal.index + 1,
+                              total: reveal.total,
+                            })}
+                          </p>
+                          <button
+                            type="button"
+                            aria-label={
+                              speech?.target === `reveal:${reveal.step_id}`
+                                ? t("Stop reading")
+                                : t("Read aloud")
+                            }
+                            title={
+                              speech?.target === `reveal:${reveal.step_id}`
+                                ? t("Stop reading")
+                                : t("Read aloud")
+                            }
+                            className="ml-auto shrink-0 rounded-lg border border-[var(--border)] bg-[var(--background)] p-1 text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
+                            onClick={() =>
+                              toggleSpeak(`reveal:${reveal.step_id}`, revealSpeechSource(reveal))
+                            }
+                          >
+                            {speech?.target === `reveal:${reveal.step_id}` ? (
+                              <VolumeX size={14} aria-hidden="true" />
+                            ) : (
+                              <Volume2 size={14} aria-hidden="true" />
+                            )}
+                          </button>
+                        </div>
                         <InlineMarkdown content={reveal.math} />
                         <div className="mt-1 text-sm text-[var(--muted-foreground)]">
                           <MarkdownRenderer content={reveal.explanation} enableMath />
                         </div>
+                        {speech?.target === `reveal:${reveal.step_id}` && (
+                          <KaraokeTranscript
+                            text={speech.text}
+                            activeWord={speech.word}
+                            label={t("Follow along")}
+                          />
+                        )}
                       </li>
                     ))}
                   </ol>
