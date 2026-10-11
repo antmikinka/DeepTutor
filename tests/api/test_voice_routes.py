@@ -146,3 +146,45 @@ def test_stt_rejects_empty_upload(client: TestClient) -> None:
         files={"file": ("empty.webm", b"", "audio/webm")},
     )
     assert resp.status_code == 400
+
+
+def test_speak_text_verbalizes_math_without_a_provider(client: TestClient) -> None:
+    """Speak-text is pure string work: no TTS model is configured in tests."""
+    resp = client.post(
+        "/api/voice/speak-text",
+        json={"text": r"Differentiate $\frac{1}{2}\sin(x^2)$ where $\alpha \le 2$."},
+    )
+    assert resp.status_code == 200
+    speech = resp.json()["speech"]
+    assert "1 over 2" in speech
+    assert "sine" in speech
+    assert "squared" in speech
+    assert "less than or equal to" in speech
+    assert "\\" not in speech
+    assert "$" not in speech
+
+
+def test_speak_text_can_leave_inner_tex_alone(client: TestClient) -> None:
+    resp = client.post(
+        "/api/voice/speak-text",
+        json={"text": r"The bound $\frac{1}{2}$ holds.", "math_speak": False},
+    )
+    assert resp.status_code == 200
+    speech = resp.json()["speech"]
+    # Delimiters are stripped so nobody says "dollar", but TeX survives.
+    assert "$" not in speech
+    assert "frac" in speech
+
+
+def test_speak_text_caps_and_validates(client: TestClient) -> None:
+    long_resp = client.post(
+        "/api/voice/speak-text",
+        json={"text": "word " * 2000},  # 10k chars in, under the 12k request cap
+    )
+    assert long_resp.status_code == 200
+    assert len(long_resp.json()["speech"]) <= 4000
+
+    empty = client.post("/api/voice/speak-text", json={"text": ""})
+    assert empty.status_code == 422
+    oversized = client.post("/api/voice/speak-text", json={"text": "x" * 12001})
+    assert oversized.status_code == 422

@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 
 from deeptutor.services.voice import (
     VoiceProviderError,
+    strip_markdown_for_speech,
     synthesize_speech,
     transcribe_audio,
 )
@@ -28,6 +29,10 @@ router = APIRouter()
 # Guard against pathological uploads (the providers cap well below this anyway).
 _MAX_AUDIO_BYTES = 25 * 1024 * 1024  # 25 MB, matching OpenAI's limit.
 
+# Speak-text is pure CPU string work; these caps keep one request bounded.
+_MAX_SPEAK_INPUT_CHARS = 12_000
+_MAX_SPEAK_OUTPUT_CHARS = 4_000
+
 
 class TTSRequest(BaseModel):
     """Text-to-speech request body."""
@@ -35,6 +40,13 @@ class TTSRequest(BaseModel):
     text: str = Field(..., min_length=1)
     voice: str | None = None
     format: str | None = None
+
+
+class SpeakTextRequest(BaseModel):
+    """Speech-text preparation request body."""
+
+    text: str = Field(..., min_length=1, max_length=_MAX_SPEAK_INPUT_CHARS)
+    math_speak: bool = True
 
 
 @router.post("/tts")
@@ -63,6 +75,24 @@ async def text_to_speech(payload: TTSRequest) -> Response:
         media_type=content_type,
         headers={"Cache-Control": "no-store"},
     )
+
+
+@router.post("/speak-text")
+async def prepare_speak_text(payload: SpeakTextRequest) -> dict[str, str]:
+    """Reduce Markdown/LaTeX to plain speakable prose ("math speak").
+
+    Pure text work — no voice provider is needed, so narration features can
+    verbalize math even on deployments without a TTS model configured. The
+    browser speaks the result with its own voice engine, which keeps word
+    boundary events available for karaoke-style highlighting; feeding it raw
+    TeX instead would make it say "dollar" and "backslash".
+    """
+    speech = strip_markdown_for_speech(
+        payload.text,
+        max_chars=_MAX_SPEAK_OUTPUT_CHARS,
+        math_speak=payload.math_speak,
+    )
+    return {"speech": speech}
 
 
 @router.post("/stt")
