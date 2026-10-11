@@ -143,26 +143,35 @@ describe("sequence sound cues", () => {
     sound.setSoundEnabled(true);
   });
 
-  it("plays the semitone ladder for combos", () => {
+  it("plays the semitone ladder for combos, each rung a bell with an overtone", () => {
     sound.playCombo(3);
-    expect(oscillators).toHaveLength(1);
+    const fundamental = 440 * Math.pow(2, 2 / 12);
+    expect(oscillators).toHaveLength(2);
     expect(oscillators[0].type).toBe("sine");
-    expect(oscillators[0].frequency.value).toBeCloseTo(440 * Math.pow(2, 2 / 12), 6);
+    expect(oscillators[0].frequency.value).toBeCloseTo(fundamental, 6);
     expect(oscillators[0].start).toHaveBeenCalledTimes(1);
     expect(oscillators[0].stop).toHaveBeenCalledTimes(1);
+    // The shimmer sits one octave up, same waveform.
+    expect(oscillators[1].type).toBe("sine");
+    expect(oscillators[1].frequency.value).toBeCloseTo(fundamental * 2, 6);
   });
 
-  it("plays one low tone when the combo breaks", () => {
+  it("plays a soft descending minor third when the combo breaks", () => {
     sound.playBreak();
-    expect(oscillators).toHaveLength(1);
-    expect(oscillators[0].frequency.value).toBeCloseTo(130.81, 6);
+    expect(oscillators).toHaveLength(2);
+    expect(oscillators.map(oscillator => oscillator.type)).toEqual(["triangle", "triangle"]);
+    const [high, low] = oscillators.map(oscillator => oscillator.frequency.value);
+    expect(high).toBeCloseTo(311.13, 2);
+    expect(low).toBeCloseTo(233.08, 2);
+    expect(low).toBeLessThan(high);
   });
 
-  it("plays exactly three rising tones on success", () => {
+  it("plays a four-note rising arpeggio whose top note blooms", () => {
     sound.playSuccess();
-    expect(oscillators).toHaveLength(3);
+    expect(oscillators).toHaveLength(5);
     expect(oscillators.map(oscillator => oscillator.frequency.value)).toEqual([
-      523.25, 659.25, 783.99,
+      523.25, 659.25, 783.99, 1046.5, 2093,
     ]);
+    expect(oscillators.every(oscillator => oscillator.type === "sine")).toBe(true);
   });
 });
